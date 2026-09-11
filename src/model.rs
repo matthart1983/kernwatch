@@ -171,13 +171,17 @@ pub fn module_row(m: &crate::domain::Module) -> Vec<String> {
         format!("{:.1} KiB", m.bytes as f64 / 1024.),
         m.refs.to_string(),
         field("dependent modules"),
-        if m.taint.contains('E') {
+        if m.taint.starts_with("unavailable") || m.taint == "—" {
+            "unknown"
+        } else if m.taint.contains('E') {
             "yes"
         } else {
             "not flagged"
         }
         .into(),
-        if m.taint.contains('O') {
+        if m.taint.starts_with("unavailable") || m.taint == "—" {
+            "unknown"
+        } else if m.taint.contains('O') {
             "out-of-tree"
         } else {
             "in-tree"
@@ -271,7 +275,9 @@ pub fn cgroup_row(g: &crate::domain::Cgroup) -> Vec<String> {
         num(g.runtime_pct),
         g.quota.clone(),
         num(g.throttled_ms_s),
-        format!("{:.0}", g.memory_bytes as f64 / 1048576.),
+        g.memory_bytes
+            .map(|v| format!("{:.0}", v as f64 / 1048576.))
+            .unwrap_or("—".into()),
         field("memory.max")
             .parse::<u64>()
             .map(|n| format!("{:.0}", n as f64 / 1048576.))

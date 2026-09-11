@@ -57,19 +57,29 @@ impl Series {
             .and_then(|s| s.value)
     }
     pub fn window(&self, end: u64, seconds: u64) -> Vec<Option<f64>> {
-        let start = end.saturating_sub(seconds * 1000);
+        // Absolute, one-second buckets. A refresh within the same second cannot
+        // shift historical points. Negative (pre-boot) slots stay blank.
+        let last_second = end / 1000;
         let mut index = 0;
         let mut out = Vec::with_capacity(seconds as usize + 1);
-        for at in (start..=end).step_by(1000) {
-            while index < self.samples.len() && self.samples[index].at_ms <= at {
+        for offset in (0..=seconds).rev() {
+            let Some(second) = last_second.checked_sub(offset) else {
+                out.push(None);
+                continue;
+            };
+            let start = second * 1000;
+            let stop = start.saturating_add(999).min(end);
+            while index < self.samples.len() && self.samples[index].at_ms <= stop {
                 index += 1;
             }
             out.push(
                 index
                     .checked_sub(1)
                     .and_then(|i| self.samples.get(i))
-                    .filter(|s| at.saturating_sub(s.at_ms) <= 1500)
-                    .and_then(|s| s.value),
+                    // A bucket requires its own observation. Never carry a
+                    // previous value forward to fill uncollected time.
+                    .filter(|s| s.at_ms >= start)
+                    .and_then(|s| s.value.filter(|v| v.is_finite())),
             );
         }
         out
@@ -193,7 +203,16 @@ pub struct Histogram {
     pub unit: String,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RunnableWait {
+    pub pid: u32,
+    pub start_ticks: u64,
+    pub cpu: u32,
+    pub age_ms: f64,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Telemetry {
+    #[serde(default)]
+    pub runnable_waits: Vec<RunnableWait>,
     pub boot_id: String,
     pub hostname: String,
     pub kernel: String,
@@ -281,7 +300,7 @@ pub struct Cgroup {
     pub inode: u64,
     pub runtime_pct: Option<f64>,
     pub throttled_ms_s: Option<f64>,
-    pub memory_bytes: u64,
+    pub memory_bytes: Option<u64>,
     pub quota: String,
     pub cpus: String,
     pub fields: Vec<(String, String)>,

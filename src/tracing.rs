@@ -325,6 +325,30 @@ impl Correlator {
         self.irq.clear();
     }
     pub fn apply(&self, t: &mut Telemetry) {
+        t.runnable_waits.clear();
+        if self.lost == 0 {
+            for task in &t.tasks {
+                let matching = self.task_starts.get(&task.pid).is_some_and(|ns| {
+                    (*ns as u128 * unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u128
+                        / 1_000_000_000) as u64
+                        == task.start_ticks
+                });
+                if matching {
+                    if let Some((at, _)) = self.wake.get(&task.pid) {
+                        if let Some(age) = (t.at_ms as u128 * 1_000_000).checked_sub(*at as u128) {
+                            t.runnable_waits.push(RunnableWait {
+                                pid: task.pid,
+                                start_ticks: task.start_ticks,
+                                cpu: task.cpu,
+                                age_ms: age as f64 / 1e6,
+                            });
+                        }
+                    }
+                }
+            }
+            t.runnable_waits
+                .sort_by(|a, b| b.age_ms.total_cmp(&a.age_ms));
+        }
         for task in &mut t.tasks {
             let matching = self.task_starts.get(&task.pid).is_some_and(|ns| {
                 (*ns as u128 * unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u128

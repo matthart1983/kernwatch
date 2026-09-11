@@ -11,7 +11,8 @@ pub struct Inventory {
     previous: BTreeMap<String, (u64, Vec<u64>)>,
     slow_at: u64,
     modules: Vec<Module>,
-    pss: BTreeMap<(u32, u64), u64>,
+    pss: BTreeMap<(u32, u64), (u64, u64)>,
+    pss_cursor: usize,
 }
 fn read(path: impl AsRef<Path>) -> String {
     fs::read_to_string(path)
@@ -87,11 +88,12 @@ impl Inventory {
             let major_minor = format!("{}:{}", v[0], v[1]);
             let root = format!("/sys/class/block/{name}");
             let identity = fs::metadata(&root).map(|m| m.ino()).unwrap_or(0);
-            let rate = self.rates(
-                format!("disk:{major_minor}:{name}:{identity}"),
-                at,
-                n.clone(),
-            );
+            let rate_key = format!("disk:{major_minor}:{name}:{identity}");
+            if !self.previous.contains_key(&rate_key) {
+                t.series
+                    .retain(|key, _| !key.starts_with(&format!("device:{name}:")));
+            }
+            let rate = self.rates(rate_key, at, n.clone());
             let rv = |i| rate.as_ref().map(|v| v[i]);
             let mut d = Device {
                 name: name.into(),
@@ -104,8 +106,6 @@ impl Inventory {
                 busy_pct: rv(9).map(|v| v / 10.),
                 ..Default::default()
             };
-            d.fields
-                .push(("sysfs identity".into(), identity.to_string()));
             d.await_ms = rate.as_ref().and_then(|v| {
                 if v[0] + v[4] > 0. {
                     Some((v[3] + v[7]) / (v[0] + v[4]))
@@ -114,6 +114,7 @@ impl Inventory {
                 }
             });
             d.fields = vec![
+                ("sysfs identity".into(), identity.to_string()),
                 ("device".into(), format!("/dev/{name} · {}", d.major_minor)),
                 (
                     "read/write".into(),
@@ -121,11 +122,19 @@ impl Inventory {
                 ),
                 ("in flight".into(), d.inflight.to_string()),
                 (
+                    "IOPS / await scope".into(),
+                    "completed reads and writes; excludes discard and flush".into(),
+                ),
+                (
                     "mean completed await".into(),
                     format!("{} ms", fmt(d.await_ms)),
                 ),
             ];
             for (label, file) in [
+                ("firmware", "device/firmware_rev"),
+                ("write cache", "queue/write_cache"),
+                ("FUA support", "queue/fua"),
+                ("physical block bytes", "queue/physical_block_size"),
                 ("scheduler", "queue/scheduler"),
                 ("rotational", "queue/rotational"),
                 ("logical block bytes", "queue/logical_block_size"),
@@ -228,20 +237,23 @@ impl Inventory {
             let counts = counters(&stat);
             let usage = counts.get("usage_usec").copied();
             let throttle = counts.get("throttled_usec").copied();
-            let rate = usage
-                .zip(throttle)
-                .and_then(|(u, h)| self.rates(format!("cgroup:{}", meta.ino()), at, vec![u, h]));
+            let rate =
+                usage.and_then(|u| self.rates(format!("cgroup:{}:usage", meta.ino()), at, vec![u]));
+            let throttle_rate = throttle
+                .and_then(|h| self.rates(format!("cgroup:{}:throttle", meta.ino()), at, vec![h]));
             let mut group = Cgroup {
                 path: path.clone(),
                 inode: meta.ino(),
                 runtime_pct: rate.as_ref().map(|v| v[0] / 10000.),
-                throttled_ms_s: rate.as_ref().map(|v| v[1] / 1000.),
-                memory_bytes: read(root.join("memory.current")).parse().unwrap_or(0),
+                throttled_ms_s: throttle_rate.as_ref().map(|v| v[0] / 1000.),
+                memory_bytes: read(root.join("memory.current")).parse().ok(),
                 quota: read(root.join("cpu.max")),
                 cpus: read(root.join("cpuset.cpus.effective")),
                 ..Default::default()
             };
             for file in [
+                "cpu.stat",
+                "io.stat",
                 "cpu.max",
                 "cpu.weight",
                 "cpuset.cpus.effective",
@@ -257,6 +269,110 @@ impl Inventory {
                 group
                     .fields
                     .push((file.into(), read(root.join(file)).replace('\n', " · ")));
+            }
+            let mut cpu_limit: Option<(f64, String)> = None;
+            let mut memory_limit: Option<(u64, String)> = None;
+            let mut limits_complete = true;
+            for ancestor in root
+                .ancestors()
+                .take_while(|p| p.starts_with("/sys/fs/cgroup"))
+            {
+                let source = ancestor
+                    .strip_prefix("/sys/fs/cgroup")
+                    .unwrap()
+                    .display()
+                    .to_string();
+                let source = format!("/{}", source);
+                match fs::read_to_string(ancestor.join("cpu.max")) {
+                    Ok(raw) => {
+                        let words: Vec<_> = raw.split_whitespace().collect();
+                        if let [quota, period] = words.as_slice() {
+                            if *quota != "max" {
+                                if let (Ok(q), Ok(p)) =
+                                    (quota.parse::<f64>(), period.parse::<f64>())
+                                {
+                                    if p > 0. && cpu_limit.as_ref().is_none_or(|(v, _)| q / p < *v)
+                                    {
+                                        cpu_limit = Some((q / p, source.clone()));
+                                    }
+                                } else {
+                                    limits_complete = false;
+                                }
+                            }
+                        } else {
+                            limits_complete = false;
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => limits_complete = false,
+                }
+                match fs::read_to_string(ancestor.join("memory.max")) {
+                    Ok(raw) if raw.trim() == "max" => {}
+                    Ok(raw) => match raw.trim().parse::<u64>() {
+                        Ok(bytes) if memory_limit.as_ref().is_none_or(|(v, _)| bytes < *v) => {
+                            memory_limit = Some((bytes, source))
+                        }
+                        Ok(_) => {}
+                        Err(_) => limits_complete = false,
+                    },
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => limits_complete = false,
+                }
+            }
+            group.fields.push((
+                "effective CPU quota ceiling".into(),
+                if !limits_complete {
+                    "unknown: ancestor metadata incomplete".into()
+                } else {
+                    cpu_limit
+                        .map(|(v, p)| {
+                            format!("{v:.3} CPUs · constraint at {p}; shared with siblings")
+                        })
+                        .unwrap_or("no finite quota observed".into())
+                },
+            ));
+            group.fields.push((
+                "effective memory ceiling".into(),
+                if !limits_complete {
+                    "unknown: ancestor metadata incomplete".into()
+                } else {
+                    memory_limit
+                        .map(|(v, p)| {
+                            format!(
+                                "{} MiB · constraint at {p}; shared with siblings",
+                                v / 1048576
+                            )
+                        })
+                        .unwrap_or("no finite limit observed".into())
+                },
+            ));
+            if let Ok(raw) = fs::read_to_string(root.join("io.stat")) {
+                for line in raw.lines() {
+                    let mut fields = line.split_whitespace();
+                    let Some(device) = fields.next() else {
+                        continue;
+                    };
+                    for field in fields {
+                        let Some((kind, count)) = field.split_once('=') else {
+                            continue;
+                        };
+                        let Ok(count) = count.parse::<u64>() else {
+                            continue;
+                        };
+                        let key = format!("cgroup:{}:io:{device}:{kind}", meta.ino());
+                        let rate = self.rates(key.clone(), at, vec![count]).map(|v| v[0]);
+                        let unit = if kind.ends_with("bytes") {
+                            "bytes/s"
+                        } else {
+                            "ops/s"
+                        };
+                        t.record(&key, rate, unit, rate.unwrap_or(1.).max(1.));
+                        group.fields.push((
+                            format!("I/O {device} {kind}"),
+                            format!("{} {unit}", fmt(rate)),
+                        ));
+                    }
+                }
             }
             group.fields.push((
                 "runtime (one CPU)".into(),
@@ -426,13 +542,20 @@ impl Inventory {
                     self.module_events.drain(..self.module_events.len() - 64);
                 }
             }
-            self.pss.clear();
-            for task in t
+            let mut leaders: Vec<_> = t
                 .tasks
                 .iter()
                 .filter(|x| x.rss_bytes > 0 && x.pid == x.tgid)
-                .take(32)
-            {
+                .collect();
+            leaders.sort_by_key(|x| (x.pid, x.start_ticks));
+            let live: std::collections::BTreeSet<_> =
+                leaders.iter().map(|x| (x.pid, x.start_ticks)).collect();
+            self.pss.retain(|key, _| live.contains(key));
+            let count = leaders.len().min(32);
+            let offset = self.pss_cursor % leaders.len().max(1);
+            self.pss_cursor = (offset + count) % leaders.len().max(1);
+            for task in leaders.iter().cycle().skip(offset).take(count) {
+                self.pss.remove(&(task.pid, task.start_ticks));
                 if crate::actions::validate_task(task.pid as i32, task.start_ticks).is_err() {
                     continue;
                 }
@@ -447,16 +570,19 @@ impl Inventory {
                     }) {
                         if crate::actions::validate_task(task.pid as i32, task.start_ticks).is_ok()
                         {
-                            self.pss
-                                .insert((task.pid, task.start_ticks), pss.saturating_mul(1024));
+                            self.pss.insert(
+                                (task.pid, task.start_ticks),
+                                (pss.saturating_mul(1024), at),
+                            );
                         }
                     }
                 }
             }
         }
         for task in &mut t.tasks {
-            task.pss_bytes = self.pss.get(&(task.pid, task.start_ticks)).copied();
-            task.pss_at_ms = task.pss_bytes.map(|_| self.slow_at);
+            let sample = self.pss.get(&(task.pid, task.start_ticks));
+            task.pss_bytes = sample.map(|v| v.0);
+            task.pss_at_ms = sample.map(|v| v.1);
         }
         t.capabilities
             .insert("modules/pss".into(), self.module_quality.clone());

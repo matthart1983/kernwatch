@@ -51,11 +51,7 @@ impl Source {
                     .filter(|t| {
                         self.name == "task_metadata" || (t.rss_bytes > 0 && t.pid == t.tgid)
                     })
-                    .take(if self.name == "task_metadata" {
-                        10000
-                    } else {
-                        32
-                    })
+                    .take(10000)
                     .cloned()
                     .collect()
             } else {

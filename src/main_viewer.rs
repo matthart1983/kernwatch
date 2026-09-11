@@ -1,7 +1,7 @@
 use crossterm::{
     event::{self, Event, KeyEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use kernwatch::{app::App, model, ui};
 use ratatui::{
@@ -24,6 +24,7 @@ impl Drop for Guard {
         let _ = disable_raw_mode();
         let _ = execute!(
             io::stdout(),
+            EndSynchronizedUpdate,
             LeaveAlternateScreen,
             event::DisableMouseCapture
         );
@@ -201,7 +202,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tour_scene = scene;
             }
         }
-        terminal.draw(|f| ui::draw(f, &app))?;
+        execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
+            let drawn = terminal.draw(|f| ui::draw(f, &app)).map(|_| ());
+            let finished = execute!(terminal.backend_mut(), EndSynchronizedUpdate);
+            drawn?;
+            finished?;
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Release {

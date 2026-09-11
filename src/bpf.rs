@@ -10,6 +10,7 @@ use std::{
 };
 struct Collector {
     previous: BTreeMap<u32, (u64, u128)>,
+    identities: BTreeMap<u32, String>,
     last: Instant,
     metadata: BTreeMap<u32, (Instant, String)>,
 }
@@ -17,6 +18,7 @@ impl Default for Collector {
     fn default() -> Self {
         Self {
             previous: BTreeMap::new(),
+            identities: BTreeMap::new(),
             last: Instant::now(),
             metadata: BTreeMap::new(),
         }
@@ -56,7 +58,11 @@ impl Collector {
             || std::fs::read_to_string("/proc/sys/kernel/bpf_stats_enabled")
                 .map(|s| s.trim() == "1")
                 .unwrap_or(false);
-        for result in aya::programs::loaded_programs().take(4096) {
+        for (index, result) in aya::programs::loaded_programs().take(4097).enumerate() {
+            if index == 4096 {
+                failure = Some("program enumeration limited to 4096; inventory is partial".into());
+                break;
+            }
             match result {
                 Err(e) => {
                     failure = Some(e.to_string());
@@ -64,6 +70,13 @@ impl Collector {
                 }
                 Ok(info) => {
                     let id = info.id();
+                    let identity = format!("{:016x}:{:?}", info.tag(), info.loaded_at());
+                    if self.identities.get(&id) != Some(&identity) {
+                        self.previous.remove(&id);
+                        self.metadata.remove(&id);
+                        t.series.remove(&format!("bpf.program{id}"));
+                    }
+                    self.identities.insert(id, identity);
                     let runs = info.run_count();
                     let ns = info.run_time().as_nanos();
                     let (rate, mean, cpu) = if enabled {
@@ -86,7 +99,13 @@ impl Collector {
                     } else {
                         ("stats off".into(), "—".into(), "—".into())
                     };
-                    let mapids = info.map_ids().ok().flatten().unwrap_or_default();
+                    let map_result = info.map_ids();
+                    let map_error = match &map_result {
+                        Err(e) => Some(e.to_string()),
+                        Ok(None) => Some("map IDs not exposed by kernel".into()),
+                        _ => None,
+                    };
+                    let mapids = map_result.ok().flatten().unwrap_or_default();
                     let mut details = vec![
                         ("id".into(), id.to_string()),
                         ("tag".into(), format!("{:016x}", info.tag())),
@@ -170,6 +189,9 @@ impl Collector {
                             format!("{helpers}; sampled {}s ago", at.elapsed().as_secs()),
                         ));
                     }
+                    if let Some(error) = &map_error {
+                        details.push(("map enumeration".into(), format!("unavailable: {error}")));
+                    }
                     for mid in &mapids {
                         let description = match aya::maps::MapInfo::from_id(*mid) {
                             Ok(m) => format!("{} {} · max_entries={} · key {}B / value {}B · occupancy unavailable",
@@ -199,7 +221,11 @@ impl Collector {
                         rate,
                         mean,
                         cpu,
-                        mapids.len().to_string(),
+                        if map_error.is_some() {
+                            "—".into()
+                        } else {
+                            mapids.len().to_string()
+                        },
                         info.created_by_uid()
                             .map(|n| format!("uid {n}"))
                             .unwrap_or("unknown".into()),
@@ -229,10 +255,17 @@ impl Collector {
             }
         }
         self.metadata.retain(|id, _| next.contains_key(id));
+        self.identities.retain(|id, _| next.contains_key(id));
         self.previous = next;
         if let Some(e) = failure {
-            t.capabilities
-                .insert("bpf".into(), Quality::Denied(e.clone()));
+            t.capabilities.insert(
+                "bpf".into(),
+                if e.contains("limited to") {
+                    Quality::Error(e.clone())
+                } else {
+                    Quality::Denied(e.clone())
+                },
+            );
             if rows.is_empty() {
                 rows.push(vec![
                     "—".into(),

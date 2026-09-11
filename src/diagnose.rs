@@ -196,6 +196,18 @@ impl Engine {
             }
         }
         t.issues = self.active.values().cloned().collect();
+        t.issues.sort_by_key(|i| {
+            (
+                i.state == "resolved",
+                match i.severity.as_str() {
+                    "error" | "critical" => 0,
+                    "warn" | "warning" => 1,
+                    _ => 2,
+                },
+                i.since_ms,
+                i.id.clone(),
+            )
+        });
         t.details.insert(
             "baselines".into(),
             self.baselines

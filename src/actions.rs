@@ -7,6 +7,14 @@ use std::{
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Plan {
     #[serde(default)]
+    pub issue_id: Option<String>,
+    #[serde(default)]
+    pub verification_threshold: Option<f64>,
+    #[serde(default)]
+    pub issue_subject: Option<String>,
+    #[serde(default)]
+    pub boot_id: Option<String>,
+    #[serde(default)]
     pub effective_before: Option<String>,
     #[serde(default)]
     pub effective_after: Option<String>,
@@ -154,6 +162,10 @@ impl Plan {
         let identity = host.identity(&target)?;
         let effective_before = Some(host.effective(&target)?);
         Ok(Self {
+            issue_id: None,
+            verification_threshold: None,
+            issue_subject: None,
+            boot_id: None,
             effective_before,
             effective_after: None,
             applied_at_ms: None,

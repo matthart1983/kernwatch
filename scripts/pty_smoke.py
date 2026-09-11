@@ -27,6 +27,8 @@ def run(terminate=False):
   drain(0.4);code=proc.wait(timeout=5);drain(0.05)
   assert code==0,(code,data[-400:])
   assert b'\x1b[?1049l' in data,'alternate screen not restored'
+  assert data.count(b'\x1b[?2026h') > 0,'frames are not synchronized'
+  assert data.count(b'\x1b[?2026l') >= data.count(b'\x1b[?2026h'),'synchronized update left open'
   assert termios.tcgetattr(slave)==original,'terminal attributes not restored'
   records=list(Path(work).glob('*.kwr'));reports=list(Path(work).glob('kernwatch-report-*'))
   assert records and reports,'record/export commands failed'

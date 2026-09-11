@@ -1,7 +1,7 @@
 use crossterm::{
     event::{self, Event, KeyEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use kernwatch::{app::App, collect::Collector, model, ui};
 use ratatui::{
@@ -26,6 +26,7 @@ impl Drop for Guard {
         let _ = disable_raw_mode();
         let _ = execute!(
             io::stdout(),
+            EndSynchronizedUpdate,
             LeaveAlternateScreen,
             event::DisableMouseCapture
         );
@@ -197,6 +198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if mode == "stop" {
                     td.lock().unwrap().1 = "Trace stopped".into();
                 } else {
+                    td.lock().unwrap().0 = None;
                     match kernwatch::probes::Probes::start(&mode) {
                         Ok(s) => {
                             started = Instant::now();
@@ -205,7 +207,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             td.lock().unwrap().1 =
                                 format!("{mode} active · {}s bounded capture", duration.as_secs());
                         }
-                        Err(e) => td.lock().unwrap().1 = format!("{mode}: {e}"),
+                        Err(e) => {
+                            let mut failed = kernwatch::domain::Telemetry::default();
+                            let kind = mode.split_whitespace().next().unwrap_or("syscalls");
+                            let names: Vec<&str> = if kind == "all" { vec!["scheduler", "irq", "block", "syscalls"] }
+                                else { vec![if kind == "sched" || kind == "offcpu" { "scheduler" } else { kind }] };
+                            for name in names { failed.capabilities.insert(name.into(), kernwatch::domain::Quality::Error(e.to_string())); }
+                            failed.details.insert("probe.capture_id".into(), vec![("failed".into(), kernwatch::recording::stamp().to_string())]);
+                            let mut state = td.lock().unwrap();
+                            state.0 = Some(failed);
+                            state.1 = format!("{mode}: {e}");
+                        },
                     }
                 }
             }
@@ -238,8 +250,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let live_enabled = Arc::new(AtomicBool::new(app.replay.is_none()));
     let collect_enabled = live_enabled.clone();
     let worker = std::thread::spawn(move || {
+        let mut next_sample = Instant::now();
         while !stopped.load(Ordering::Relaxed) {
-            let start = Instant::now();
             if !collect_enabled.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(50));
                 continue;
@@ -252,14 +264,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Ok(mut slot) = shared.lock() {
                 *slot = Some(next);
             }
-            while start.elapsed() < Duration::from_secs(1) && !stopped.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(50));
+            next_sample += Duration::from_secs(1);
+            if next_sample <= Instant::now() {
+                next_sample = Instant::now() + Duration::from_secs(1);
+            }
+            while !stopped.load(Ordering::Relaxed) {
+                let remaining = next_sample.saturating_duration_since(Instant::now());
+                if remaining.is_zero() { break; }
+                std::thread::sleep(remaining.min(Duration::from_millis(50)));
             }
         }
     });
     if trace {
         let _ = probe_tx.try_send("all".into());
     }
+    let mut capture_id = None;
     let mut trace_history = std::collections::BTreeMap::<String, kernwatch::domain::Series>::new();
     let state_path = std::env::var_os("XDG_STATE_HOME")
         .map(std::path::PathBuf::from)
@@ -284,6 +303,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if !s.demo {
                     let data = trace_data.lock().unwrap();
                     if let Some(c) = &data.0 {
+                        let id = c.details.get("probe.capture_id").cloned();
+                        if capture_id != id {
+                            trace_history.clear();
+                            capture_id = id;
+                        }
                         s.telemetry.metrics.extend(c.metrics.clone());
                         s.telemetry.histograms.extend(c.histograms.clone());
                         s.telemetry.details.extend(c.details.clone());
@@ -368,7 +392,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tour_scene = scene;
                 }
             }
-            terminal.draw(|f| ui::draw(f, &app))?;
+            execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
+            let drawn = terminal.draw(|f| ui::draw(f, &app)).map(|_| ());
+            let finished = execute!(terminal.backend_mut(), EndSynchronizedUpdate);
+            drawn?;
+            finished?;
             if event::poll(Duration::from_millis(100))? {
                 if let Event::Key(k) = event::read()? {
                     if k.kind != KeyEventKind::Release {

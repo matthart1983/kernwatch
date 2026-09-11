@@ -242,7 +242,7 @@ impl App {
         if !self.frozen && self.replay.is_none() && self.time_cursor.is_none() {
             let identity = self.selected_task().map(|x| (x.pid, x.start_ticks));
             let old_boot = self.snapshot.telemetry.boot_id.clone();
-            let row_key = if [4, 6, 7, 8, 9].contains(&self.tab) {
+            let row_key = if [4, 5, 6, 7, 8, 9].contains(&self.tab) {
                 self.rows()
                     .get(self.selected)
                     .and_then(|r| r.first())
@@ -384,6 +384,35 @@ impl App {
             _ => key.into(),
         }
     }
+    pub fn sort_fields(&self) -> Vec<String> {
+        match self.tab {
+            1 => [
+                "Task / PID",
+                "State",
+                "CPU",
+                "CPU %",
+                "RSS",
+                "Wake p99",
+                "Policy",
+                "Wake p50",
+                "Vol/s",
+                "Invol/s",
+                "Wchan",
+                "Verdict",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            3 => [
+                "Process", "RSS", "PSS", "Anon", "File", "Shmem", "Swap", "Faults/s", "Growth",
+                "PSS age", "Verdict",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            _ => self.snapshot.views[self.tab].columns.clone(),
+        }
+    }
     pub fn visible_tasks(&self) -> Vec<&crate::domain::Task> {
         let query = self.filter.to_lowercase();
         let mut tasks = self
@@ -417,6 +446,24 @@ impl App {
                     .unwrap_or(0.)
                     .total_cmp(&x.wake_p99_ms.unwrap_or(0.))
             }),
+            7 => tasks.sort_by(|x, y| x.policy.cmp(&y.policy)),
+            8 => tasks.sort_by(|x, y| {
+                y.wake_p50_ms
+                    .partial_cmp(&x.wake_p50_ms)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
+            9 => tasks.sort_by(|x, y| {
+                y.voluntary_s
+                    .partial_cmp(&x.voluntary_s)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
+            10 => tasks.sort_by(|x, y| {
+                y.involuntary_s
+                    .partial_cmp(&x.involuntary_s)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
+            11 => tasks.sort_by(|x, y| x.wchan.cmp(&y.wchan)),
+            12 => tasks.sort_by(|x, y| x.verdict.cmp(&y.verdict)),
             _ => {}
         }
         if self.reverse {
@@ -446,7 +493,30 @@ impl App {
                     .contains(&query)
             })
             .collect::<Vec<_>>();
-        tasks.sort_by_key(|x| std::cmp::Reverse(x.pss_bytes.unwrap_or(x.rss_bytes)));
+        match self.sort {
+            1 => tasks.sort_by(|x, y| x.name.cmp(&y.name).then(x.pid.cmp(&y.pid))),
+            2 => tasks.sort_by_key(|x| std::cmp::Reverse(x.rss_bytes)),
+            4 => tasks.sort_by_key(|x| std::cmp::Reverse(x.anon_bytes)),
+            5 => tasks.sort_by_key(|x| std::cmp::Reverse(x.file_bytes)),
+            6 => tasks.sort_by_key(|x| std::cmp::Reverse(x.shmem_bytes)),
+            7 => tasks.sort_by_key(|x| std::cmp::Reverse(x.swap_bytes)),
+            8 => tasks.sort_by(|x, y| {
+                y.minor_faults_s
+                    .partial_cmp(&x.minor_faults_s)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
+            9 => tasks.sort_by(|x, y| {
+                y.rss_growth_bytes_s
+                    .partial_cmp(&x.rss_growth_bytes_s)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
+            10 => tasks.sort_by_key(|x| x.pss_at_ms),
+            11 => tasks.sort_by(|x, y| x.verdict.cmp(&y.verdict)),
+            _ => tasks.sort_by_key(|x| std::cmp::Reverse((x.pss_bytes, x.rss_bytes))),
+        }
+        if self.reverse {
+            tasks.reverse();
+        }
         tasks
     }
     pub fn selected_task(&self) -> Option<&crate::domain::Task> {
@@ -458,7 +528,6 @@ impl App {
     pub fn visible_syscall_events(&self) -> Vec<&crate::domain::Event> {
         let rows = self.rows();
         let selected = rows.get(self.selected).and_then(|row| row.first());
-        let query = self.filter.to_lowercase();
         let mut events: Vec<_> = self
             .snapshot
             .telemetry
@@ -466,7 +535,7 @@ impl App {
             .iter()
             .filter(|event| event.source.contains("syscall"))
             .filter(|event| {
-                selected.is_none_or(|name| {
+                selected.is_some_and(|name| {
                     event
                         .message
                         .split_whitespace()
@@ -487,11 +556,6 @@ impl App {
                         .and_then(|v| v.split(|c: char| !c.is_ascii_digit() && c != '.').next())
                         .and_then(|v| v.parse::<f64>().ok())
                         .is_some_and(|v| v > 1.)
-            })
-            .filter(|event| {
-                format!("{} {}", event.message, event.subject)
-                    .to_lowercase()
-                    .contains(&query)
             })
             .collect();
         events.sort_by_key(|event| std::cmp::Reverse(event.at_ms));
@@ -529,7 +593,11 @@ impl App {
                 .map(|x| {
                     (
                         format!("{} {}", x.pid, x.name),
-                        format!("task.{}", x.pid),
+                        if self.snapshot.demo {
+                            format!("task.{}", x.pid)
+                        } else {
+                            format!("task.{}.{}", x.pid, x.start_ticks)
+                        },
                         Some(x.cpu),
                         Some(x.cgroup.clone()),
                     )
@@ -621,6 +689,18 @@ impl App {
                 telemetry
                     .cgroups
                     .iter()
+                    .filter(|g| match self.mode {
+                        4 => g
+                            .fields
+                            .iter()
+                            .any(|(k, v)| k == "cpu.stat" && !v.starts_with("unavailable")),
+                        5 => g.memory_bytes.is_some(),
+                        6 => g
+                            .fields
+                            .iter()
+                            .any(|(k, v)| k == "io.stat" && !v.starts_with("unavailable")),
+                        _ => true,
+                    })
                     .filter(|g| self.mode != 2 || g.throttled_ms_s.unwrap_or(0.) > 0.)
                     .filter(|g| {
                         self.mode != 3
@@ -1209,10 +1289,7 @@ impl App {
             KeyCode::Char('s') => {
                 self.palette = true;
                 self.command = "sort ".into();
-                self.status = format!(
-                    "Sort fields: concern, {}",
-                    self.snapshot.views[self.tab].columns.join(", ")
-                );
+                self.status = format!("Sort fields: concern, {}", self.sort_fields().join(", "));
             }
             KeyCode::Char('S') => self.reverse = !self.reverse,
             KeyCode::Char('h') => self.histogram = !self.histogram,
@@ -1256,7 +1333,8 @@ impl App {
                 self.mode = (self.mode + 1)
                     % match self.tab {
                         1 | 8 => 5,
-                        3 | 4 | 7 => 4,
+                        3 | 4 => 4,
+                        7 => 7,
                         _ => 3,
                     };
                 self.selected = 0;
@@ -1388,6 +1466,22 @@ impl App {
                     "preview irq ".into()
                 };
             }
+            KeyCode::Char('l') if self.tab == 5 => {
+                if self.replay.is_some() {
+                    self.status = "Replay is read-only; use live mode for syscall capture".into();
+                } else if self.snapshot.demo {
+                    self.status =
+                        "Demo syscall evidence is synthetic; use live mode to capture".into();
+                } else {
+                    self.frozen = false;
+                    self.time_cursor = None;
+                    self.filter.clear();
+                    self.mode = 0;
+                    self.selected = 0;
+                    self.execute("probe syscalls seconds=30");
+                }
+            }
+            KeyCode::Char('x') if self.tab == 5 => self.execute("stop-probe"),
             KeyCode::Char('l') if self.tab == 1 || self.tab == 12 => {
                 if let Some(task) = self.selected_task() {
                     let pid = task.pid;
@@ -1415,7 +1509,7 @@ impl App {
         self.focus == 0 || (self.tab == 12 && self.focus == 6) || (self.tab == 0 && self.focus == 2)
     }
     fn row_count(&self) -> usize {
-        if self.tab == 3 && self.focus == 3 {
+        if self.tab == 3 && (self.focus == 3 || self.mode != 1) {
             self.memory_tasks().len()
         } else if self.tab == 3 && self.focus == 0 {
             self.snapshot
@@ -1489,8 +1583,8 @@ impl App {
             "sort" => {
                 if arg == "concern" {
                     self.sort = 0;
-                } else if let Some(index) = self.snapshot.views[self.tab]
-                    .columns
+                } else if let Some(index) = self
+                    .sort_fields()
                     .iter()
                     .position(|s| s.eq_ignore_ascii_case(arg))
                 {
@@ -1498,7 +1592,7 @@ impl App {
                 } else {
                     self.status = format!(
                         "Unknown sort field. Choose concern or {}",
-                        self.snapshot.views[self.tab].columns.join(", ")
+                        self.sort_fields().join(", ")
                     );
                     return;
                 }
@@ -1668,7 +1762,21 @@ impl App {
                             }
                         },
                     ) {
-                        Ok(plan) => {
+                        Ok(mut plan) => {
+                            if self.tab == 11 {
+                                if let Some(issue) =
+                                    self.snapshot.telemetry.issues.get(self.selected)
+                                {
+                                    plan.issue_id = Some(issue.id.clone());
+                                    plan.verification_threshold = issue
+                                        .verification
+                                        .strip_prefix("Value below ")
+                                        .and_then(|v| v.split_whitespace().next())
+                                        .and_then(|v| v.parse().ok());
+                                    plan.issue_subject = Some(issue.subject.clone());
+                                    plan.boot_id = Some(self.snapshot.telemetry.boot_id.clone());
+                                }
+                            }
                             let msg = format!(
                                 "DRY RUN {}: {} → {}. To confirm: apply {}",
                                 plan.description,
@@ -1795,6 +1903,16 @@ impl App {
             }
             "verify" => {
                 let issue = self.snapshot.telemetry.issues.get(self.selected);
+                let action_index = issue.and_then(|issue| {
+                    self.action_journal.iter().rposition(|plan| {
+                        plan.applied
+                            && plan.issue_id.as_deref() == Some(issue.id.as_str())
+                            && plan.issue_subject.as_deref() == Some(issue.subject.as_str())
+                            && plan.boot_id.as_deref()
+                                == Some(self.snapshot.telemetry.boot_id.as_str())
+                    })
+                });
+                let action_at = action_index.and_then(|i| self.action_journal[i].applied_at_ms);
                 let key = issue.map(|i| i.id.as_str()).unwrap_or("");
                 let target = if key.starts_with("sched") {
                     Some(("sched.p99".to_string(), 1.))
@@ -1814,6 +1932,15 @@ impl App {
                     None
                 };
                 if let Some((metric, threshold)) = target {
+                    let threshold = action_index
+                        .and_then(|i| self.action_journal[i].verification_threshold)
+                        .or_else(|| {
+                            issue
+                                .and_then(|i| i.verification.strip_prefix("Value below "))
+                                .and_then(|v| v.split_whitespace().next())
+                                .and_then(|v| v.parse::<f64>().ok())
+                        })
+                        .unwrap_or(threshold);
                     let end = self.cursor();
                     let result = self
                         .snapshot
@@ -1822,30 +1949,21 @@ impl App {
                         .get(&metric)
                         .map(|s| crate::diagnose::verify(s, end, threshold))
                         .unwrap_or(crate::diagnose::Verdict::Inconclusive);
-                    let result = if self
-                        .action_journal
-                        .last()
-                        .and_then(|p| p.applied_at_ms)
-                        .is_some_and(|at| end < at.saturating_add(60000))
-                    {
+                    let result = if action_at.is_some_and(|at| end < at.saturating_add(60000)) {
                         crate::diagnose::Verdict::Inconclusive
                     } else {
                         result
                     };
-                    let before = self
-                        .action_journal
-                        .last()
-                        .and_then(|p| p.applied_at_ms)
-                        .and_then(|at| {
-                            self.snapshot
-                                .telemetry
-                                .series
-                                .get(&metric)
-                                .map(|s| (at, crate::diagnose::verify(s, at, threshold)))
-                        });
+                    let before = action_at.and_then(|at| {
+                        self.snapshot
+                            .telemetry
+                            .series
+                            .get(&metric)
+                            .map(|s| (at, crate::diagnose::verify(s, at, threshold)))
+                    });
                     let explanation=format!("{result:?}: {metric} ≤ {threshold} over {}..{end}ms; ≥60 samples, no gaps >1.5s. Causal attribution is separate.",end.saturating_sub(60000));
                     let explanation = format!("{explanation} Pre-action window: {before:?}.");
-                    if let Some(plan) = self.action_journal.last_mut() {
+                    if let Some(plan) = action_index.and_then(|i| self.action_journal.get_mut(i)) {
                         plan.verification = Some(explanation.clone());
                     }
                     if !self.action_journal.is_empty() {

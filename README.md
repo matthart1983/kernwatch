@@ -149,7 +149,9 @@ The footer shows context-specific shortcuts. Enter `capabilities` in the command
 
 ## Tracing
 
-Ordinary counters use procfs/sysfs. Wake-latency percentiles, syscall durations, and request-level I/O latency require an explicit capture and kernel BPF permissions. Collection failures are reported in the status line; kernwatch does not elevate itself.
+Ordinary counters use procfs/sysfs. Wake-latency percentiles, syscall durations, and request-level I/O latency require an explicit capture and kernel BPF permissions. Collection failures are reported in the status line and persist on an empty Syscalls tab; kernwatch does not elevate itself.
+
+On Syscalls (`6`), press `l` to collect for 30 seconds and `x` to stop. Opening the tab alone does not start tracing. A thread-specific capture uses `:probe syscalls pid=TID seconds=30`.
 
 To run a bounded capture with administrator privileges:
 

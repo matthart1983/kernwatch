@@ -236,6 +236,19 @@ fn lerp(a: Color, b: Color, t: f64) -> Color {
         _ => b,
     }
 }
+pub fn graph_scale(max: f64) -> f64 {
+    if !max.is_finite() || max <= 0. {
+        return 1.;
+    }
+    let magnitude = 10f64.powf(max.log10().floor());
+    let normalized = max / magnitude;
+    let step = [1., 2., 5., 10.]
+        .into_iter()
+        .find(|step| normalized <= *step * (1. + 1e-12))
+        .unwrap_or(10.);
+    (step * magnitude).max(max)
+}
+
 /// Missing samples paint nothing. Both columns in a braille cell have independent samples.
 pub fn dots(
     f: &mut Frame,
@@ -246,7 +259,14 @@ pub fn dots(
     flip: bool,
     alarm: bool,
 ) {
-    if area.width == 0 || area.height == 0 || max <= 0. || values.is_empty() {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    // Own the full plot rectangle, including cells which become blank.
+    // This also makes overlapping redraws independent of their previous height.
+    f.render_widget(Clear, area);
+    f.render_widget(Block::default().style(Style::default().bg(BG)), area);
+    if !max.is_finite() || max <= 0. || values.is_empty() {
         return;
     }
     let n = area.width as usize * 2;
@@ -254,9 +274,11 @@ pub fn dots(
     for (i, slot) in samples.iter_mut().enumerate() {
         let lo = i * values.len() / n;
         let hi = ((i + 1) * values.len() / n).max(lo + 1).min(values.len());
-        *slot = values
-            .get(lo..hi)
-            .and_then(|v| v.iter().filter_map(|v| *v).reduce(f64::max));
+        *slot = values.get(lo..hi).and_then(|v| {
+            v.iter()
+                .filter_map(|v| v.filter(|n| n.is_finite()))
+                .reduce(f64::max)
+        });
     }
     let bit = [[0, 1, 2, 6], [3, 4, 5, 7]];
     let subh = area.height as usize * 4;
@@ -285,9 +307,16 @@ pub fn dots(
                     1. - y as f64 / area.height as f64
                 };
                 let fg = if alarm {
-                    if height > 0.8 {
+                    let level = samples[x * 2..x * 2 + 2]
+                        .iter()
+                        .flatten()
+                        .copied()
+                        .reduce(f64::max)
+                        .unwrap_or(0.)
+                        / max;
+                    if level > 0.8 {
                         RED
-                    } else if height > 0.45 {
+                    } else if level > 0.45 {
                         GOLD
                     } else {
                         GREEN
@@ -303,6 +332,19 @@ pub fn dots(
         }
     }
 }
+/// One one-second bucket occupies exactly one terminal character (two braille
+/// dot columns). Older samples clip on the left; shorter histories stay padded.
+fn time_columns(series: &Series, cursor: u64, width: u16, max_seconds: u64) -> Vec<Option<f64>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let seconds = u64::from(width - 1).min(max_seconds);
+    let values = series.window(cursor, seconds);
+    let mut columns = vec![None; width as usize - values.len()];
+    columns.extend(values);
+    columns
+}
+
 pub fn history(
     f: &mut Frame,
     area: Rect,
@@ -311,7 +353,7 @@ pub fn history(
     color: Color,
     alarm: bool,
 ) {
-    history_window(f, area, series, cursor, color, alarm, 60)
+    history_window(f, area, series, cursor, color, alarm, 600)
 }
 #[allow(clippy::too_many_arguments)]
 pub fn history_window(
@@ -323,9 +365,24 @@ pub fn history_window(
     alarm: bool,
     seconds: u64,
 ) {
+    series_plot(f, area, series, cursor, color, false, alarm, seconds);
+}
+
+/// Shared filled-area primitive for CPU graphs and timeline lanes.
+#[allow(clippy::too_many_arguments)]
+pub fn series_plot(
+    f: &mut Frame,
+    area: Rect,
+    series: Option<&Series>,
+    cursor: u64,
+    color: Color,
+    flip: bool,
+    alarm: bool,
+    seconds: u64,
+) {
     if let Some(s) = series {
-        let values = s.window(cursor, seconds);
-        dots(f, area, &values, s.max, color, false, alarm);
+        let values = time_columns(s, cursor, area.width, seconds);
+        dots(f, area, &values, graph_scale(s.max), color, flip, alarm);
     } else {
         line(f, area, "— unavailable", DIM);
     }
@@ -357,11 +414,8 @@ pub fn graph(
     if area.width < 12 || area.height < 3 {
         return;
     }
-    let axis = upper
-        .map(|s| format!("{}{}", s.max, s.unit).chars().count() as u16 + 1)
-        .unwrap_or(7)
-        .clamp(7, 16)
-        .min(area.width.saturating_sub(2));
+    // A changing magnitude/unit label must not move the time-axis origin.
+    let axis = 16.min(area.width.saturating_sub(2));
     let plot = Rect::new(
         area.x + axis,
         area.y,
@@ -380,40 +434,29 @@ pub fn graph(
         line(
             f,
             Rect::new(area.x, area.y, axis, 1),
-            format!("{}{}", s.max, s.unit),
+            format!("{}{}", graph_scale(s.max), s.unit),
             DIM,
         );
-        dots(
-            f,
-            halves[0],
-            &s.window(cursor, 120),
-            s.max,
-            CYAN,
-            false,
-            false,
-        );
+        series_plot(f, halves[0], Some(s), cursor, CYAN, false, false, 600);
     } else {
         line(f, plot, "Trace data unavailable · : probe", DIM);
     }
     if let Some(s) = lower {
-        dots(
-            f,
-            halves[1],
-            &s.window(cursor, 120),
-            s.max,
-            PURPLE,
-            true,
-            false,
-        );
+        series_plot(f, halves[1], Some(s), cursor, PURPLE, true, false, 600);
         line(f, Rect::new(area.x, halves[1].y, 6, 1), "0", DIM);
     }
     let bottom = Rect::new(plot.x, area.bottom() - 1, plot.width, 1);
-    line(f, bottom, "−120s", DIM);
+    line(
+        f,
+        bottom,
+        format!("−{}s", plot.width.saturating_sub(1)),
+        DIM,
+    );
     if bottom.width > 20 {
         line(
             f,
             Rect::new(bottom.x + bottom.width / 2, bottom.y, 6, 1),
-            "−60s",
+            format!("−{}s", plot.width.saturating_sub(1) - plot.width / 2),
             DIM,
         );
         line(f, Rect::new(bottom.right() - 3, bottom.y, 3, 1), "now", DIM);
@@ -459,8 +502,8 @@ pub fn card(
             ),
             series,
             cursor,
-            if warn { GOLD } else { CYAN },
-            warn,
+            CYAN,
+            false,
         );
     }
 }
@@ -503,5 +546,360 @@ mod irq_alignment_tests {
         assert_eq!(b.get(9, 0).symbol(), "Q");
         assert_eq!(b.get(9, 2).symbol(), "7");
         assert_eq!(b.get(29, 2).symbol(), "8");
+    }
+}
+
+#[cfg(test)]
+mod timeline_spacing_tests {
+    use super::{history_window, CYAN};
+    use crate::domain::{Sample, Series};
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn series(samples: &[(u64, Option<f64>)]) -> Series {
+        Series {
+            max: 10.,
+            samples: samples
+                .iter()
+                .map(|(at_ms, value)| Sample {
+                    at_ms: *at_ms,
+                    value: *value,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+    fn plotted_columns(s: &Series, cursor: u64) -> Vec<u16> {
+        let mut t = Terminal::new(TestBackend::new(61, 1)).unwrap();
+        t.draw(|f| history_window(f, f.size(), Some(s), cursor, CYAN, false, 60))
+            .unwrap();
+        (0..61)
+            .filter(|x| {
+                t.backend()
+                    .buffer()
+                    .get(*x, 0)
+                    .symbol()
+                    .chars()
+                    .any(|c| ('\u{2801}'..='\u{28ff}').contains(&c))
+            })
+            .collect()
+    }
+    #[test]
+    fn value_scale_does_not_change_time_axis_origin() {
+        let mut s = series(&(0..=120).map(|i| (i * 1000, Some(5.))).collect::<Vec<_>>());
+        let origin = |s: &Series| {
+            let mut t = Terminal::new(TestBackend::new(80, 8)).unwrap();
+            t.draw(|f| super::graph(f, f.size(), Some(s), None, 120_000))
+                .unwrap();
+            (0..80)
+                .find(|x| {
+                    (0..6).any(|y| {
+                        t.backend()
+                            .buffer()
+                            .get(*x, y)
+                            .symbol()
+                            .chars()
+                            .any(|c| ('\u{2801}'..='\u{28ff}').contains(&c))
+                    })
+                })
+                .unwrap()
+        };
+        let before = origin(&s);
+        s.max = 100_000.;
+        s.unit = "requests/s".into();
+        assert_eq!(origin(&s), before);
+    }
+    #[test]
+    fn refresh_jitter_does_not_move_completed_buckets() {
+        let s = series(&[(10_100, Some(1.)), (11_250, Some(2.)), (12_300, Some(3.))]);
+        assert_eq!(s.window(12_400, 5), s.window(12_990, 5));
+        assert_eq!(
+            s.window(12_400, 5),
+            vec![None, None, None, Some(1.), Some(2.), Some(3.)]
+        );
+    }
+    #[test]
+    fn each_elapsed_second_moves_history_by_one_slot() {
+        let s = series(&[(60_100, Some(8.))]);
+        assert_eq!(plotted_columns(&s, 60_500), vec![60]);
+        assert_eq!(plotted_columns(&s, 60_999), vec![60]);
+        assert_eq!(plotted_columns(&s, 61_001), vec![59]);
+        assert_eq!(plotted_columns(&s, 62_900), vec![58]);
+    }
+    #[test]
+    fn startup_keeps_fixed_width_and_padding_before_boot() {
+        let s = series(&[(250, Some(4.))]);
+        let window = s.window(500, 60);
+        assert_eq!(window.len(), 61);
+        assert!(window[..60].iter().all(Option::is_none));
+        assert_eq!(plotted_columns(&s, 500), vec![60]);
+    }
+    #[test]
+    fn missing_seconds_are_not_filled_with_previous_values_or_future_samples() {
+        let s = series(&[
+            (100, Some(1.)),
+            (1_900, None),
+            (3_100, Some(3.)),
+            (3_900, Some(9.)),
+        ]);
+        assert_eq!(s.window(3_500, 3), vec![Some(1.), None, None, Some(3.)]);
+        assert_eq!(s.window(3_950, 3), vec![Some(1.), None, None, Some(9.)]);
+    }
+}
+
+#[cfg(test)]
+mod redraw_tests {
+    use super::*;
+    use crate::domain::{Sample, Series};
+    use ratatui::{backend::TestBackend, Terminal};
+    #[test]
+    fn scale_changes_only_at_defined_boundaries() {
+        assert_eq!(graph_scale(10.1), 20.);
+        assert_eq!(graph_scale(19.9), 20.);
+        assert_eq!(graph_scale(20.1), 50.);
+        assert_eq!(graph_scale(100.), 100.);
+        assert_eq!(graph_scale(0.012), 0.02);
+        assert_eq!(graph_scale(f64::NAN), 1.);
+    }
+    #[test]
+    fn small_new_peak_does_not_repaint_completed_history() {
+        let mut series = Series {
+            max: 10.1,
+            samples: (0..60)
+                .map(|i| Sample {
+                    at_ms: i * 1000,
+                    value: Some(5.),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let render = |s: &Series| {
+            let mut terminal = Terminal::new(TestBackend::new(61, 8)).unwrap();
+            terminal
+                .draw(|f| history(f, f.size(), Some(s), 60000, CYAN, false))
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+        let before = render(&series);
+        series.max = 10.9;
+        series.push(60000, Some(10.9));
+        let after = render(&series);
+        for x in 0..60 {
+            for y in 0..8 {
+                assert_eq!(
+                    before.get(x, y),
+                    after.get(x, y),
+                    "completed column {x}, row {y} changed"
+                );
+            }
+        }
+    }
+    #[test]
+    fn uncollected_seconds_stay_blank_even_when_a_previous_sample_is_recent() {
+        let s = Series {
+            samples: vec![
+                Sample {
+                    at_ms: 990,
+                    value: Some(2.),
+                },
+                Sample {
+                    at_ms: 2010,
+                    value: Some(3.),
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(s.window(2100, 2), vec![Some(2.), None, Some(3.)]);
+        assert_eq!(s.window(6000, 2), vec![None, None, None]);
+    }
+    #[test]
+    fn clearing_plot_removes_old_bars_even_with_no_samples() {
+        for values in [vec![], vec![None], vec![Some(f64::NAN)]] {
+            let mut terminal = Terminal::new(TestBackend::new(10, 4)).unwrap();
+            terminal
+                .draw(|f| {
+                    dots(f, f.size(), &[Some(10.)], 10., CYAN, false, false);
+                    dots(f, f.size(), &values, 10., CYAN, false, false);
+                })
+                .unwrap();
+            assert!(terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .all(|c| c.symbol() == " "));
+        }
+    }
+    #[test]
+    fn alarm_color_uses_each_historical_value_not_canvas_height() {
+        let mut terminal = Terminal::new(TestBackend::new(2, 1)).unwrap();
+        terminal
+            .draw(|f| {
+                dots(
+                    f,
+                    f.size(),
+                    &[Some(10.), Some(10.), Some(90.), Some(90.)],
+                    100.,
+                    CYAN,
+                    false,
+                    true,
+                )
+            })
+            .unwrap();
+        assert_eq!(terminal.backend().buffer().get(0, 0).fg, GREEN);
+        assert_eq!(terminal.backend().buffer().get(1, 0).fg, RED);
+    }
+    #[test]
+    fn changing_current_card_alarm_does_not_recolor_history() {
+        let series = Series {
+            max: 100.,
+            samples: vec![Sample {
+                at_ms: 1000,
+                value: Some(40.),
+            }],
+            ..Default::default()
+        };
+        let render = |warn| {
+            let mut terminal = Terminal::new(TestBackend::new(30, 6)).unwrap();
+            terminal
+                .draw(|f| card(f, f.size(), "test", "40%", "", Some(&series), 1000, warn))
+                .unwrap();
+            (0..30)
+                .map(|x| terminal.backend().buffer().get(x, 4).clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(render(false), render(true));
+    }
+}
+
+#[cfg(test)]
+mod fixed_sample_width_tests {
+    use super::*;
+    use crate::domain::{Sample, Series};
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn samples_have_identical_width_and_spacing_in_every_panel_size() {
+        let series = Series {
+            max: 10.,
+            samples: vec![
+                Sample {
+                    at_ms: 100000,
+                    value: Some(10.),
+                },
+                Sample {
+                    at_ms: 103000,
+                    value: Some(10.),
+                },
+            ],
+            ..Default::default()
+        };
+        for width in [5, 12, 61, 120, 240] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 4)).unwrap();
+            terminal
+                .draw(|f| history(f, f.size(), Some(&series), 103900, CYAN, false))
+                .unwrap();
+            let columns: Vec<_> = (0..width)
+                .filter(|x| terminal.backend().buffer().get(*x, 0).symbol() != " ")
+                .collect();
+            assert_eq!(columns, vec![width - 4, width - 1], "width {width}");
+            for x in columns {
+                for y in 0..4 {
+                    assert_eq!(terminal.backend().buffer().get(x, y).symbol(), "⣿");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resize_crops_history_without_resampling_values() {
+        let series = Series {
+            samples: (0..10)
+                .map(|i| Sample {
+                    at_ms: i * 1000,
+                    value: Some(i as f64),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        assert_eq!(
+            time_columns(&series, 9000, 3, 600),
+            vec![Some(7.), Some(8.), Some(9.)]
+        );
+        let wide = time_columns(&series, 9000, 15, 600);
+        assert!(wide[..5].iter().all(Option::is_none));
+        assert_eq!(
+            wide[5..],
+            (0..10).map(|i| Some(i as f64)).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            time_columns(&series, 9000, 15, 2)[12..],
+            vec![Some(7.), Some(8.), Some(9.)]
+        );
+        assert!(time_columns(&series, 9000, 0, 600).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod insufficient_history_tests {
+    use super::*;
+    use crate::domain::{Sample, Series};
+    use ratatui::{backend::TestBackend, Terminal};
+    #[test]
+    fn sparse_history_draws_only_observed_columns_and_never_fills_panel() {
+        let s = Series {
+            max: 10.,
+            samples: vec![
+                Sample {
+                    at_ms: 990,
+                    value: Some(5.),
+                },
+                Sample {
+                    at_ms: 2010,
+                    value: Some(8.),
+                },
+            ],
+            ..Default::default()
+        };
+        for width in [12, 80, 240] {
+            let mut t = Terminal::new(TestBackend::new(width, 4)).unwrap();
+            t.draw(|f| series_plot(f, f.size(), Some(&s), 2100, CYAN, false, false, 600))
+                .unwrap();
+            let columns: Vec<_> = (0..width)
+                .filter(|x| (0..4).any(|y| t.backend().buffer().get(*x, y).symbol() != " "))
+                .collect();
+            assert_eq!(columns, vec![width - 3, width - 1]);
+        }
+    }
+    #[test]
+    fn cpu_graph_and_timeline_use_identical_sample_geometry() {
+        let s = Series {
+            max: 10.,
+            samples: vec![
+                Sample {
+                    at_ms: 990,
+                    value: Some(5.),
+                },
+                Sample {
+                    at_ms: 2010,
+                    value: Some(8.),
+                },
+            ],
+            ..Default::default()
+        };
+        let mut cpu = Terminal::new(TestBackend::new(97, 6)).unwrap();
+        cpu.draw(|f| graph(f, f.size(), Some(&s), None, 2100))
+            .unwrap();
+        let mut history_plot = Terminal::new(TestBackend::new(80, 4)).unwrap();
+        history_plot
+            .draw(|f| history(f, f.size(), Some(&s), 2100, CYAN, false))
+            .unwrap();
+        for x in 0..80 {
+            for y in 0..4 {
+                assert_eq!(
+                    cpu.backend().buffer().get(16 + x, y),
+                    history_plot.backend().buffer().get(x, y)
+                );
+            }
+        }
     }
 }

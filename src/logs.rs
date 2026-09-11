@@ -24,7 +24,13 @@ impl Default for KernelLog {
             },
             Err(e) => Self {
                 file: None,
-                quality: Quality::Denied(e.to_string()),
+                quality: match e.kind() {
+                    io::ErrorKind::PermissionDenied => Quality::Denied(e.to_string()),
+                    io::ErrorKind::NotFound => {
+                        Quality::Unsupported("/dev/kmsg is not present".into())
+                    }
+                    _ => Quality::Error(e.to_string()),
+                },
                 events: Vec::new(),
             },
         }

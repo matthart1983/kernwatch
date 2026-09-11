@@ -442,9 +442,44 @@ impl Enricher {
                     .is_some()
                 {
                     numa.push((
-                        name,
+                        name.clone(),
                         format!("CPUs {}", read(&format!("{}/cpulist", n.path().display()))),
                     ));
+                    if let Ok(raw) = fs::read_to_string(n.path().join("meminfo")) {
+                        for line in raw.lines() {
+                            let fields: Vec<_> = line.split_whitespace().collect();
+                            if fields.len() >= 4
+                                && ["MemTotal:", "MemFree:", "MemUsed:"].contains(&fields[2])
+                            {
+                                numa.push((
+                                    format!("{name} {}", fields[2].trim_end_matches(':')),
+                                    fields[3..].join(" "),
+                                ));
+                            }
+                        }
+                    }
+                    if let Ok(raw) = fs::read_to_string(n.path().join("numastat")) {
+                        for line in raw.lines() {
+                            let fields: Vec<_> = line.split_whitespace().collect();
+                            if let [counter, value] = fields.as_slice() {
+                                if let Ok(count) = value.parse::<u64>() {
+                                    let key = format!("numa.{name}.{counter}");
+                                    let rate = self
+                                        .previous
+                                        .get(&key)
+                                        .and_then(|v| count.checked_sub(v[0]))
+                                        .map(|v| v as f64 / dt);
+                                    self.previous.insert(key.clone(), vec![count]);
+                                    t.record(&key, rate, "pages/s", rate.unwrap_or(1.).max(1.));
+                                    numa.push((
+                                        format!("{name} {counter}"),
+                                        rate.map(|v| format!("{v:.1} pages/s"))
+                                            .unwrap_or("warming".into()),
+                                    ));
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -659,14 +694,23 @@ impl Enricher {
             "/cpu",
             4.,
         );
+        t.metrics.insert(
+            "dstate".into(),
+            Measurement::known(blocked, "tasks", "visible procfs tasks in D state", t.at_ms),
+        );
         t.record("dstate", Some(blocked), "tasks", blocked.max(1.));
         let runtime = t
             .tasks
             .iter()
-            .map(|x| (x.pid, x.cpu_pct))
+            .map(|x| (x.pid, x.start_ticks, x.cpu_pct))
             .collect::<Vec<_>>();
-        for (pid, cpu) in runtime {
-            t.record(&format!("task.runtime{pid}"), cpu, "% / one CPU", 100.);
+        for (pid, start, cpu) in runtime {
+            t.record(
+                &format!("task.runtime{pid}.{start}"),
+                cpu,
+                "% / one CPU",
+                100.,
+            );
         }
 
         let prior_event = self.logs.events.last().map(|e| e.at_ms).unwrap_or(0);

@@ -34,6 +34,7 @@ struct Event {
     text: [u8; 80],
 }
 pub struct Probes {
+    capture_id: String,
     owned_attachments: BTreeMap<String, String>,
     _bpf: Ebpf,
     stats: Option<std::os::fd::OwnedFd>,
@@ -187,6 +188,7 @@ impl Probes {
             ACTIVE_STATS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(Self {
+            capture_id: crate::recording::stamp().to_string(),
             owned_attachments,
             stats,
             stats_error,
@@ -341,6 +343,10 @@ impl Probes {
     }
     pub fn apply(&self, t: &mut Telemetry) {
         self.correlator.apply(t);
+        t.details.insert(
+            "probe.capture_id".into(),
+            vec![("id".into(), self.capture_id.clone())],
+        );
         t.details.insert(
             "owned_program_ids".into(),
             self._bpf
@@ -739,6 +745,21 @@ impl Probes {
             .collect::<Vec<_>>();
         for row in &rows {
             let value = row[5].trim_end_matches("ms").parse::<f64>().ok();
+            t.metrics.insert(
+                format!("syscall.{}.p99", row[0]),
+                Measurement {
+                    value,
+                    unit: "ms".into(),
+                    source: "syscall enter/exit; last 4096 completed calls".into(),
+                    end_ms: t.at_ms,
+                    quality: if self.correlator.lost == 0 {
+                        Quality::Available
+                    } else {
+                        Quality::Stale
+                    },
+                    ..Default::default()
+                },
+            );
             t.record(
                 &format!("syscall.{}.p99", row[0]),
                 value,
@@ -746,7 +767,7 @@ impl Probes {
                 value.unwrap_or(1.).max(1.),
             );
         }
-        if !rows.is_empty() {
+        if self.mode == "syscalls" || self.mode == "all" {
             t.details.insert(
                 "syscall_rows".into(),
                 rows.iter()

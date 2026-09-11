@@ -662,7 +662,7 @@ pub fn incident() -> Telemetry {
             cpus: cpus.into(),
             runtime_pct: Some(runtime),
             throttled_ms_s: Some(0.),
-            memory_bytes: memory,
+            memory_bytes: Some(memory),
             fields: vec![
                 ("path".into(), path.into()),
                 ("cpu.max".into(), quota.into()),

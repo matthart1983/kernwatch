@@ -34,6 +34,22 @@ fn controls(f: &mut Frame, r: Rect, label: &str, a: &App) {
         format!(
             " {label}    · g mode {}    / filter {}",
             match a.tab {
+                1 => ["all", "runnable", "D-state", "kernel", "threads"]
+                    .get(a.mode)
+                    .unwrap_or(&"all")
+                    .to_string(),
+                2 => ["CPU", "task", "cgroup"]
+                    .get(a.mode)
+                    .unwrap_or(&"CPU")
+                    .to_string(),
+                3 => ["overview", "slab", "hugepages", "cgroup"]
+                    .get(a.mode)
+                    .unwrap_or(&"overview")
+                    .to_string(),
+                7 => ["tree", "flat", "throttled", "pressure", "cpu", "mem", "io"]
+                    .get(a.mode)
+                    .unwrap_or(&"tree")
+                    .to_string(),
                 5 => ["all", "negative returns", "p99 >1ms"]
                     .get(a.mode)
                     .unwrap_or(&"all")
@@ -62,11 +78,11 @@ fn task_latency_key(a: &App, task: &crate::domain::Task) -> String {
 }
 fn task_latency_history(f: &mut Frame, r: Rect, a: &App, task: &crate::domain::Task) {
     let key = task_latency_key(a, task);
-    if t(a)
-        .series
-        .get(&key)
-        .is_some_and(|s| s.window(a.cursor(), 60).iter().any(Option::is_some))
-    {
+    if t(a).series.get(&key).is_some_and(|s| {
+        s.window(a.cursor(), u64::from(r.width.saturating_sub(1)).min(600))
+            .iter()
+            .any(Option::is_some)
+    }) {
         hist(f, r, a, &key, false);
     } else {
         let state = match t(a).capabilities.get("scheduler") {
@@ -203,12 +219,7 @@ fn tasks_panel(f: &mut Frame, r: Rect, a: &App, id: usize) {
         a.selected.saturating_sub(offset),
     );
     if with_history {
-        line(
-            f,
-            Rect::new(cols[1].x, cols[1].y, 13, 1),
-            "latency 60s",
-            DIM,
-        );
+        line(f, Rect::new(cols[1].x, cols[1].y, 13, 1), "1s/column", DIM);
         for (i, task) in visible.iter().enumerate() {
             task_latency_history(
                 f,
@@ -270,7 +281,7 @@ fn cpu_panel(f: &mut Frame, r: Rect, a: &App, id: usize, side: bool) {
                 Rect::new(regions[1].x + 5, y, w, 1),
                 a,
                 &format!("cpu.{}", c.id),
-                c.busy > 90.,
+                true,
             );
             line(
                 f,
@@ -295,7 +306,7 @@ fn cpu_panel(f: &mut Frame, r: Rect, a: &App, id: usize, side: bool) {
                 Rect::new(r.x, r.y + 1, r.width.saturating_sub(1), 1),
                 a,
                 &format!("cpu.{}", c.id),
-                c.busy > 90.,
+                true,
             );
             line(
                 f,
@@ -338,27 +349,9 @@ fn timeline_rows(t: &crate::domain::Telemetry) -> [(&'static str, &'static str);
 }
 fn timeline(f: &mut Frame, r: Rect, a: &App, id: usize) {
     let rows = timeline_rows(t(a));
-    let first = rows
-        .iter()
-        .filter_map(|(_, key)| {
-            t(a).series
-                .get(*key)?
-                .samples
-                .iter()
-                .find(|s| s.at_ms <= a.cursor() && s.value.is_some())
-                .map(|s| s.at_ms)
-        })
-        .min();
-    let seconds = first
-        .map(|first| {
-            a.cursor()
-                .saturating_sub(first)
-                .div_ceil(1000)
-                .clamp(1, 600)
-        })
-        .unwrap_or(600);
-    let subtitle = format!("{seconds}s collected · up to 10m · ← → cursor");
-    let inner = p(f, r, a, id, "timeline", &subtitle);
+    let seconds = 600;
+    let subtitle = "1s / column · ← → cursor";
+    let inner = p(f, r, a, id, "timeline", subtitle);
     for (i, (label, key)) in rows.iter().enumerate() {
         if i as u16 >= inner.height.saturating_sub(1) {
             break;
@@ -385,43 +378,50 @@ fn timeline(f: &mut Frame, r: Rect, a: &App, id: usize) {
             CYAN,
         );
         let area = Rect::new(inner.x + 25, y, inner.width.saturating_sub(25), 1);
-        if series.is_some_and(|s| s.window(a.cursor(), seconds).iter().any(Option::is_some)) {
+        if series.is_some_and(|s| {
+            s.window(
+                a.cursor(),
+                u64::from(area.width.saturating_sub(1)).min(seconds),
+            )
+            .iter()
+            .any(Option::is_some)
+        }) {
             history_window(f, area, series, a.cursor(), CYAN, i > 0, seconds);
         } else {
             line(f, area, "waiting for samples", DIM);
         }
     }
     if inner.height > 5 {
-        let marks = t(a)
-            .events
-            .iter()
-            .filter(|e| {
-                e.at_ms <= a.cursor()
-                    && e.at_ms >= a.cursor().saturating_sub(seconds * 1000)
-                    && !e.source.contains("syscall")
-            })
-            .rev()
-            .take(4)
-            .map(|e| {
-                format!(
-                    "▲ {} {}",
-                    clock(a, e.at_ms),
-                    e.source.split_whitespace().next().unwrap_or("event")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("    ");
+        let plot_x = inner.x + 25;
+        let width = inner.width.saturating_sub(25);
         line(
             f,
-            Rect::new(
-                inner.x + 14,
-                inner.bottom() - 1,
-                inner.width.saturating_sub(14),
-                1,
-            ),
-            marks,
-            GOLD,
+            Rect::new(inner.x, inner.bottom() - 1, 24.min(inner.width), 1),
+            "events · 1s/col",
+            DIM,
         );
+        if width > 0 {
+            let end_second = a.cursor() / 1000;
+            for event in &t(a).events {
+                if event.at_ms > a.cursor() || event.source.contains("syscall") {
+                    continue;
+                }
+                let age = end_second.saturating_sub(event.at_ms / 1000);
+                if age > seconds {
+                    continue;
+                }
+                if age >= u64::from(width) {
+                    continue;
+                }
+                let x = width - 1 - age as u16;
+                line(
+                    f,
+                    Rect::new(plot_x + x, inner.bottom() - 1, 1, 1),
+                    "▲",
+                    GOLD,
+                );
+            }
+        }
     }
 }
 fn clock(a: &App, ms: u64) -> String {
@@ -444,7 +444,7 @@ fn summary_fields(f: &mut Frame, r: Rect, a: &App, key: &str) {
         .as_ref()
         .and_then(|k| t(a).details.get(k))
         .or_else(|| {
-            if key == "bpf" && selected.is_some() {
+            if selected.is_some() {
                 None
             } else {
                 t(a).details.get(key)
@@ -488,6 +488,10 @@ fn summary_fields(f: &mut Frame, r: Rect, a: &App, key: &str) {
     }
 }
 pub fn draw(f: &mut Frame, r: Rect, a: &App) {
+    if a.tab == 5 && !a.snapshot.views[5].rows.iter().any(|row| row.len() >= 10) {
+        syscall_empty(f, r, a);
+        return;
+    }
     if r.height < 26 || r.width < 110 {
         compact(f, r, a);
         return;
@@ -821,14 +825,22 @@ fn overview(f: &mut Frame, r: Rect, a: &App) {
             "run queue",
             "runqueue",
             " /cpu",
-            "runnable / logical CPU",
+            "visible runnable / logical CPU",
             false,
         ),
         (
             "softirq peak CPU",
-            "softirq",
+            if a.snapshot.demo {
+                "softirq"
+            } else {
+                "softirq.peak"
+            },
             "%",
-            "NET_RX execution time",
+            if a.snapshot.demo {
+                "NET_RX execution time"
+            } else {
+                "all softirq · CPU time delta"
+            },
             true,
         ),
         ("PSI some", "psi.cpu", "%", "10s avg · CPU", false),
@@ -868,7 +880,15 @@ fn overview(f: &mut Frame, r: Rect, a: &App) {
     );
     for (i, (label, key, unit)) in [
         ("sched", "sched.p99", "ms"),
-        ("irq", "softirq", "%"),
+        (
+            "irq",
+            if a.snapshot.demo {
+                "softirq"
+            } else {
+                "softirq.peak"
+            },
+            "%",
+        ),
         ("memory", "memory.used", "GiB"),
         ("block I/O", "disk.p99", "ms"),
         ("D-state", "dstate", ""),
@@ -901,8 +921,7 @@ fn overview(f: &mut Frame, r: Rect, a: &App) {
             ),
             a,
             key,
-            t(a).concern(["sched", "irq", "memory", "block", "dstate"][i])
-                .is_some(),
+            true,
         );
     }
     if health.height > 6 {
@@ -934,7 +953,7 @@ fn tasks(f: &mut Frame, r: Rect, a: &App) {
         f,
         bands[0],
         &format!(
-            "g all / running / D / kernel / threads    G group {}",
+            "g all / runnable / D / kernel / threads    G group {}",
             ["none", "cgroup", "UID", "parent"][a.grouping]
         ),
         a,
@@ -997,7 +1016,7 @@ fn tasks(f: &mut Frame, r: Rect, a: &App) {
             ],
         );
     }
-    let why = p(f, bands[3], a, 3, "why waiting", "same time window · 60s");
+    let why = p(f, bands[3], a, 3, "why waiting", "1s / column");
     let plots = vertical(
         why,
         &[
@@ -1014,7 +1033,13 @@ fn tasks(f: &mut Frame, r: Rect, a: &App) {
         plots[1],
         a,
         &task
-            .map(|x| format!("task.runtime{}", x.pid))
+            .map(|x| {
+                if a.snapshot.demo {
+                    format!("task.runtime{}", x.pid)
+                } else {
+                    format!("task.runtime{}.{}", x.pid, x.start_ticks)
+                }
+            })
             .unwrap_or_default(),
         false,
     );
@@ -1223,7 +1248,7 @@ fn scheduler(f: &mut Frame, r: Rect, a: &App) {
     } else if a.auto_scale {
         let series = t(a).series.get(key).cloned().map(|mut s| {
             s.max = s
-                .window(a.cursor(), 60)
+                .window(a.cursor(), u64::from(plot.width.saturating_sub(1)).min(600))
                 .into_iter()
                 .flatten()
                 .reduce(f64::max)
@@ -1242,8 +1267,62 @@ fn scheduler(f: &mut Frame, r: Rect, a: &App) {
         a,
         3,
         &format!("placement · {label}"),
-        "resident tasks · last sampled wakeup",
+        if a.snapshot.demo {
+            "resident tasks · last sampled wakeup"
+        } else {
+            "observed runnable waits · sampled placement"
+        },
     );
+    if !a.snapshot.demo {
+        let waits: Vec<_> = t(a)
+            .runnable_waits
+            .iter()
+            .filter(|wait| {
+                if a.mode == 2 {
+                    t(a).tasks.iter().any(|task| {
+                        task.pid == wait.pid
+                            && task.start_ticks == wait.start_ticks
+                            && subject.and_then(|s| s.3.as_ref()) == Some(&task.cgroup)
+                    })
+                } else if a.mode == 1 {
+                    subject
+                        .is_some_and(|s| s.1 == format!("task.{}.{}", wait.pid, wait.start_ticks))
+                } else {
+                    wait.cpu == c
+                }
+            })
+            .collect();
+        if waits.is_empty() {
+            line(
+                f,
+                waiting,
+                if matches!(
+                    t(a).capabilities.get("scheduler"),
+                    Some(crate::domain::Quality::Available)
+                ) {
+                    "No identity-confirmed waits observed; capture is not a complete run queue"
+                } else {
+                    "Waiting evidence unavailable · l capture; loss invalidates outstanding waits"
+                },
+                DIM,
+            );
+        } else {
+            for (i, wait) in waits.iter().take(waiting.height as usize).enumerate() {
+                line(
+                    f,
+                    Rect::new(waiting.x, waiting.y + i as u16, waiting.width, 1),
+                    format!(
+                        "PID {} · CPU {} · waiting {}",
+                        wait.pid,
+                        wait.cpu,
+                        latency(Some(wait.age_ms))
+                    ),
+                    GOLD,
+                );
+            }
+        }
+        return;
+    }
     for (i, x) in t(a)
         .tasks
         .iter()
@@ -1270,7 +1349,7 @@ fn scheduler(f: &mut Frame, r: Rect, a: &App) {
             f,
             Rect::new(waiting.right() - 13, y, 13, 1),
             if x.state == "R" {
-                "running".into()
+                "runnable".into()
             } else {
                 latency(x.wake_p99_ms)
             },
@@ -1343,7 +1422,21 @@ fn memory(f: &mut Frame, r: Rect, a: &App) {
         "growth requires allocation evidence",
     );
     if let Some(values) = t(a).details.get("slab") {
-        for (i, (label, val)) in values.iter().enumerate().take(6) {
+        let size = |val: &str| {
+            val.split_whitespace()
+                .next()
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.)
+                * if val.contains("GiB") { 1024. } else { 1. }
+        };
+        let max = values.iter().map(|(_, v)| size(v)).fold(1., f64::max);
+        let capacity = slab.height as usize;
+        let offset = if a.mode == 1 {
+            a.selected.saturating_sub(capacity.saturating_sub(1))
+        } else {
+            0
+        };
+        for (i, (label, val)) in values.iter().skip(offset).take(capacity).enumerate() {
             line(f, Rect::new(slab.x, slab.y + i as u16, 20, 1), label, FG);
             let n = val
                 .split_whitespace()
@@ -1359,7 +1452,7 @@ fn memory(f: &mut Frame, r: Rect, a: &App) {
                     1,
                 ),
                 if val.contains("GiB") { n * 1024. } else { n },
-                1434.,
+                max,
                 if i == 0 { GOLD } else { CYAN },
             );
             line(
@@ -1373,7 +1466,9 @@ fn memory(f: &mut Frame, r: Rect, a: &App) {
         line(f, slab, "Slab cache access unavailable", DIM);
     }
     let numa = p(f, bands[3], a, 2, "NUMA / zones", "locality and watermarks");
-    if a.mode == 2 {
+    if a.mode == 1 {
+        memory_fields(f, numa, a, "slab");
+    } else if a.mode == 2 {
         memory_fields(f, numa, a, "hugepages");
     } else if a.mode == 3 {
         let data = t(a)
@@ -1383,10 +1478,8 @@ fn memory(f: &mut Frame, r: Rect, a: &App) {
                 vec![
                     g.path.clone(),
                     number(
-                        Some(
-                            g.memory_bytes as f64
-                                / if a.memory_gib { 1073741824. } else { 1048576. },
-                        ),
+                        g.memory_bytes
+                            .map(|v| v as f64 / if a.memory_gib { 1073741824. } else { 1048576. }),
                         if a.memory_gib { " GiB" } else { " MiB" },
                     ),
                     g.fields
@@ -1414,7 +1507,7 @@ fn memory(f: &mut Frame, r: Rect, a: &App) {
         a,
         3,
         "allocation / reclaim",
-        "▲ alloc · ▼ reclaim /s",
+        "▲ alloc · ▼ reclaim pages/s",
     );
     graph(
         f,
@@ -1429,7 +1522,7 @@ fn memory(f: &mut Frame, r: Rect, a: &App) {
         a,
         4,
         "process memory",
-        "PSS sampled for 32 concern tasks / 5s",
+        "PSS rotating batch ≤32 / 5s · age per process",
     );
     let divisor = if a.memory_gib { 1073741824. } else { 1048576. };
     let memory = |v: Option<u64>| {
@@ -1612,6 +1705,55 @@ fn histogram(f: &mut Frame, r: Rect, a: &App, key: &str) {
         line(f, r, "Histogram acquisition unavailable", DIM);
     }
 }
+fn syscall_empty(f: &mut Frame, r: Rect, a: &App) {
+    use crate::domain::Quality;
+    let area = p(
+        f,
+        r,
+        a,
+        1,
+        "Syscalls",
+        "l capture · x stop · : scoped capture",
+    );
+    let quality = t(a).capabilities.get("syscalls");
+    let mut lines = match quality {
+        Some(Quality::Available) => vec![
+            "Capture active — waiting for completed syscalls.".to_string(),
+            "A call appears after both its entry and return are observed.".into(),
+        ],
+        Some(Quality::Error(error) | Quality::Denied(error) | Quality::Unsupported(error)) => {
+            vec!["Syscall capture unavailable".into(), error.clone()]
+        }
+        _ => vec![
+            "No syscall capture has been collected.".into(),
+            "This tab needs kernel tracing; procfs cannot provide syscall events.".into(),
+        ],
+    };
+    lines.push(String::new());
+    if a.replay.is_some() {
+        lines.push("This recording contains no syscall rows. Open a recording made during syscall capture.".into());
+    } else if !cfg!(target_os = "linux") {
+        lines.push("Live capture requires Linux. Use --demo or replay a Linux recording.".into());
+    } else if !a.snapshot.demo {
+        lines.extend([
+            "Press l to capture all visible system syscalls for 30 seconds.".into(),
+            "Capture requires BPF privileges. If denied, restart kernwatch as root and press l."
+                .into(),
+            "For a quieter capture: :probe syscalls pid=TID seconds=30".into(),
+            "pid= selects one thread. x stops capture; collected rows remain available.".into(),
+        ]);
+    }
+    if let Some(scope) = t(a).details.get("probe.scope") {
+        lines.push(String::new());
+        lines.extend(scope.iter().map(|(k, v)| format!("{k}: {v}")));
+    }
+    f.render_widget(
+        Paragraph::new(lines.join("\n"))
+            .style(Style::default().fg(FG))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
 fn syscalls(f: &mut Frame, r: Rect, a: &App) {
     let bands = vertical(
         r,
@@ -1625,7 +1767,7 @@ fn syscalls(f: &mut Frame, r: Rect, a: &App) {
     controls(
         f,
         bands[0],
-        "trace : probe syscalls [pid=TID|cgroup=PATH]   g all / errors / >1ms · E errors · u stack",
+        "l capture 30s · x stop · :probe syscalls pid=TID · g all / errors / >1ms · E errors · u stack",
         a,
     );
     capture_status(
@@ -1725,8 +1867,13 @@ fn irq(f: &mut Frame, r: Rect, a: &App) {
         row.push(
             if row.get(4).is_some_and(|v| v.parse::<u32>().is_ok()) {
                 "single CPU"
+            } else if row
+                .get(4)
+                .is_some_and(|v| crate::actions::validate_cpus(v).is_ok())
+            {
+                "multiple CPUs"
             } else {
-                "distributed"
+                "unknown"
             }
             .into(),
         );
@@ -1794,7 +1941,7 @@ fn cgroups(f: &mut Frame, r: Rect, a: &App) {
     controls(
         f,
         bands[0],
-        "show tree / flat / throttled / pressure    controllers cpu mem io",
+        "g tree / flat / throttled / pressure / cpu / mem / io",
         a,
     );
     let tr = p(
@@ -2173,7 +2320,14 @@ fn logs(f: &mut Frame, r: Rect, a: &App) {
             rect,
         );
     }
-    let rate = p(f, bands[2], a, 2, "event rate", "last 10m");
+    let rate = p(
+        f,
+        bands[2],
+        a,
+        2,
+        "kernel kmsg event rate",
+        "1s / column · source-specific",
+    );
     hist(f, rate, a, "events.rate", false);
     let trace = p(
         f,
@@ -2216,16 +2370,22 @@ fn diagnose(f: &mut Frame, r: Rect, a: &App) {
     line(
         f,
         bands[0],
-        " pipeline   collect ✓    correlate ✓    rank ✓    verify pending    report",
+        if t(a).issues.is_empty() {
+            " analysis · no active findings · inspect source readiness"
+        } else {
+            " analysis · findings available · causes require evidence · verify selected issue"
+        },
         DIM,
     );
     let cols = horizontal(
         bands[1],
         &[Constraint::Percentage(31), Constraint::Percentage(69)],
     );
-    let issues = p(f, cols[0], a, 1, "issues", "by impact");
-    for (i, issue) in t(a).issues.iter().enumerate() {
-        let y = issues.y + i as u16 * 4;
+    let issues = p(f, cols[0], a, 1, "issues", "active first · severity");
+    let capacity = (issues.height as usize / 4).max(1);
+    let offset = a.selected.saturating_sub(capacity - 1);
+    for (i, issue) in t(a).issues.iter().enumerate().skip(offset) {
+        let y = issues.y + (i - offset) as u16 * 4;
         if y + 2 >= issues.bottom() {
             break;
         }
@@ -2344,7 +2504,7 @@ fn diagnose(f: &mut Frame, r: Rect, a: &App) {
         a,
         4,
         "report preview",
-        "Markdown · e export bundle",
+        "whole snapshot · Markdown · e export bundle",
     );
     f.render_widget(
         Paragraph::new(
@@ -2385,6 +2545,8 @@ fn compact(f: &mut Frame, r: Rect, a: &App) {
     let bands = vertical(r, &[Constraint::Min(8), Constraint::Length(6)]);
     if a.tab == 0 || a.tab == 12 {
         cpu_panel(f, bands[0], a, 1, true);
+    } else if a.tab == 1 {
+        tasks_panel(f, bands[0], a, 1);
     } else {
         let inner = p(
             f,
@@ -2394,16 +2556,62 @@ fn compact(f: &mut Frame, r: Rect, a: &App) {
             crate::model::TABS[a.tab].0,
             "compact · Space expand",
         );
-        let headers = a.snapshot.views[a.tab]
-            .columns
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
+        let (columns, data) = match a.tab {
+            11 => (
+                vec!["Issue".into(), "Subject".into(), "State".into()],
+                t(a).issues
+                    .iter()
+                    .map(|i| vec![i.title.clone(), i.subject.clone(), i.state.clone()])
+                    .collect(),
+            ),
+            3 => (
+                vec![
+                    "Process".into(),
+                    "RSS MiB".into(),
+                    "PSS MiB".into(),
+                    "PSS age".into(),
+                ],
+                a.memory_tasks()
+                    .iter()
+                    .map(|x| {
+                        vec![
+                            format!("{} {}", x.pid, x.name),
+                            format!("{:.1}", x.rss_bytes as f64 / 1048576.),
+                            number(x.pss_bytes.map(|v| v as f64 / 1048576.), ""),
+                            x.pss_at_ms
+                                .map(|at| format!("{}s", t(a).at_ms.saturating_sub(at) / 1000))
+                                .unwrap_or("—".into()),
+                        ]
+                    })
+                    .collect(),
+            ),
+            2 => (
+                vec!["Subject".into(), "Wake p99".into(), "Capture".into()],
+                a.scheduler_subjects()
+                    .iter()
+                    .map(|x| {
+                        vec![
+                            x.0.clone(),
+                            latency(t(a).series.get(&x.1).and_then(|s| s.at(a.cursor()))),
+                            format!(
+                                "{:?}",
+                                t(a).capabilities
+                                    .get("scheduler")
+                                    .cloned()
+                                    .unwrap_or_default()
+                            ),
+                        ]
+                    })
+                    .collect(),
+            ),
+            _ => (a.snapshot.views[a.tab].columns.clone(), a.rows()),
+        };
+        let headers = columns.iter().map(String::as_str).collect::<Vec<_>>();
         table(
             f,
             inner,
             &headers,
-            &a.rows(),
+            &data,
             &vec![1; headers.len().max(1)],
             a.selected,
         );
@@ -2953,6 +3161,27 @@ fn capture_status(f: &mut Frame, r: Rect, a: &App, source: &str) {
 #[cfg(test)]
 mod timeline_tests {
     use super::*;
+    #[test]
+    fn event_markers_use_one_column_per_second_after_resize() {
+        let mut a = App::new(crate::model::demo());
+        a.snapshot.telemetry.at_ms = 600000;
+        a.snapshot.telemetry.events = [600000, 597000, 588000]
+            .into_iter()
+            .map(|at_ms| crate::domain::Event {
+                at_ms,
+                source: "test".into(),
+                ..Default::default()
+            })
+            .collect();
+        for width in [80, 160] {
+            let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(width, 8)).unwrap();
+            terminal.draw(|f| timeline(f, f.size(), &a, 8)).unwrap();
+            let columns: Vec<_> = (0..width)
+                .filter(|x| terminal.backend().buffer().get(*x, 6).symbol() == "▲")
+                .collect();
+            assert_eq!(columns, vec![width - 14, width - 5, width - 2]);
+        }
+    }
     #[test]
     fn newly_started_timeline_displays_all_five_measured_lanes() {
         let mut a = App::new(crate::model::demo());

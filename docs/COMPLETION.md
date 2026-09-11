@@ -1,5 +1,7 @@
 # Requirement completion ledger
 
+> Historical ledger: the [12 September tab/table audit](TAB_GAP_AUDIT.md) identifies additional correctness and implementation gaps, including screens marked validated below. Use the [current completion plan](TAB_IMPLEMENTATION_PLAN.md) for outstanding work.
+
 Acceptance audit against the original specification, 11 September 2026. `validated` means implementation and recorded checks on the declared environment, not certification of every kernel, driver or terminal. Optional enrichment and hardware boundaries are stated in each row. The specification remains the original acceptance target; reference corrections are documented in VISUAL_REVIEW.md.
 
 A follow-up [gap audit](GAPS.md) adds metadata collectors and corrects over-broad completion claims. Rows marked partial still contain implementation work.
