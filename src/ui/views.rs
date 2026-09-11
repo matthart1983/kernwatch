@@ -3118,14 +3118,13 @@ fn memory_text(value: &str, gib: bool) -> String {
 }
 fn memory_fields(f: &mut Frame, area: Rect, a: &App, key: &str) {
     if let Some(values) = t(a).details.get(key) {
-        text(
-            f,
-            area,
-            values
-                .iter()
-                .map(|(k, v)| Line::raw(format!("{k}: {}", memory_text(v, a.memory_gib))))
-                .collect(),
-        );
+        // Same two-column layout as every other detail panel; only the unit
+        // conversion is particular to memory.
+        let converted = values
+            .iter()
+            .map(|(k, v)| (k.clone(), memory_text(v, a.memory_gib)))
+            .collect::<Vec<_>>();
+        fields_widget(f, area, &converted, 0);
     } else {
         summary_fields(f, area, a, key);
     }
