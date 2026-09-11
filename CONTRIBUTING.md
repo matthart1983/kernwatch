@@ -20,3 +20,9 @@ UI changes should be reviewed at 80×24 and the reference size for the affected 
 Changes to `probes/kernwatch.bpf.c` require a BPF-capable Clang and regeneration of the embedded object with `sh probes/build.sh`. Privileged tests belong in a disposable VM. The VM smoke test writes to its expendable virtio disk; do not run its guest mode on the host. See `docs/VALIDATION.md` for the test boundary.
 
 Do not commit live recordings, reports, host audit output, credentials, or generated build directories. Open issues should include the view, terminal size, build revision, and a minimal reproduction; use demo captures when possible.
+
+## Binary releases
+
+Update the package version and `docs/RELEASE_NOTES.md`, then push a matching `v` tag (for example, `v0.1.0`). `.github/workflows/release.yml` builds and tests Linux x86-64 GNU and musl targets, packages executable archives with SHA-256 checksums, and publishes only after both builds pass. The manual dispatch accepts an existing tag. Existing published assets are not overwritten; a failed draft publication can be inspected and completed through GitHub Releases.
+
+The older `scripts/package_release.py` packages a local evidence bundle and requires separate privileged VM logs. It is not the binary release pipeline.

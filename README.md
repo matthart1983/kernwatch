@@ -35,6 +35,23 @@ Demo mode needs no administrator privileges, starts no host probes and does not 
 
 ## Quick start
 
+### Download a binary
+
+Get Linux x86-64 binaries from [GitHub Releases](https://github.com/matthart1983/kernwatch/releases/latest). The static musl build is recommended for portability; a glibc build is also available. While the repository is private, downloads require repository access.
+
+With GitHub CLI authenticated:
+
+```sh
+gh release download --repo matthart1983/kernwatch --pattern 'kernwatch-linux-x86_64-static.tar.gz*'
+sha256sum --check kernwatch-linux-x86_64-static.tar.gz.sha256
+tar -xzf kernwatch-linux-x86_64-static.tar.gz
+mkdir -p ~/.local/bin
+install -m 755 kernwatch-linux-x86_64-static ~/.local/bin/kernwatch
+~/.local/bin/kernwatch --demo-tour
+```
+
+Archives include the executable, license and README. Static linking removes the glibc requirement; live tracing still depends on kernel features and permissions.
+
 ### Build from source
 
 Requirements: **Linux x86-64**, **Rust 1.98 or newer**, and a C linker. Internet access is needed for the first dependency download.
