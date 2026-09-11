@@ -2977,17 +2977,74 @@ pub fn expanded(f: &mut Frame, r: Rect, a: &App) {
         }
     }
 }
+/// Detail fields as two aligned columns rather than `name: value` prose.
+///
+/// Names share one dim column sized to the widest of them, so every value
+/// starts at the same offset and the column can be scanned downward. A value
+/// too long for the remaining width wraps under itself instead of returning to
+/// the left edge, where a continuation reads as a nameless field.
 fn fields_widget(f: &mut Frame, r: Rect, items: &[(String, String)], scroll: u16) {
-    let lines = items
+    if r.width == 0 || r.height == 0 {
+        return;
+    }
+    let widest = items
         .iter()
-        .map(|(k, v)| Line::raw(format!("{k}: {v}")))
-        .collect::<Vec<_>>();
-    f.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
-        r,
-    );
+        .map(|(k, _)| Line::raw(k.as_str()).width())
+        .max()
+        .unwrap_or(0);
+    // Never let one long name push the values off a narrow panel.
+    let names = widest.clamp(6, (r.width as usize / 2).max(6));
+    let values = (r.width as usize).saturating_sub(names + 2);
+    if values < 4 {
+        let lines = items
+            .iter()
+            .map(|(k, v)| Line::raw(format!("{k}: {v}")))
+            .collect::<Vec<_>>();
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((scroll, 0)),
+            r,
+        );
+        return;
+    }
+    let mut lines = Vec::new();
+    for (name, value) in items {
+        for (index, part) in wrapped(value, values).into_iter().enumerate() {
+            let label = if index == 0 {
+                format!("{:<names$}  ", ellipsize(name, names))
+            } else {
+                " ".repeat(names + 2)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(label, Style::default().fg(DIM)),
+                Span::styled(part, Style::default().fg(severity(value))),
+            ]));
+        }
+    }
+    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), r);
+}
+
+/// Break text on whitespace to fit `width`, keeping over-long words intact.
+fn wrapped(text: &str, width: usize) -> Vec<String> {
+    let text = text.replace(['\n', '\t'], " ");
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let candidate = if current.is_empty() {
+            word.to_owned()
+        } else {
+            format!("{current} {word}")
+        };
+        if Line::raw(&candidate).width() <= width || current.is_empty() {
+            current = candidate;
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current = word.to_owned();
+        }
+    }
+    lines.push(current);
+    lines
 }
 
 fn history_table(
@@ -3208,5 +3265,57 @@ mod timeline_tests {
         t.record("disk.p99", Some(4.), "ms", 5.);
         assert_eq!(timeline_rows(&t)[2], ("sched p99", "sched.p99"));
         assert_eq!(timeline_rows(&t)[3], ("I/O p99", "disk.p99"));
+    }
+}
+
+#[cfg(test)]
+mod field_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+    fn row(buffer: &ratatui::buffer::Buffer, y: u16, width: u16) -> String {
+        (0..width)
+            .map(|x| buffer.get(x, y).symbol())
+            .collect::<String>()
+    }
+    #[test]
+    fn long_values_break_on_whitespace_and_keep_unbreakable_words_whole() {
+        assert_eq!(wrapped("one two three", 7), vec!["one two", "three"]);
+        assert_eq!(wrapped("", 10), vec![""]);
+        // A word wider than the column is never chopped into fragments.
+        assert_eq!(
+            wrapped("short supercalifragilistic", 6),
+            vec!["short", "supercalifragilistic"]
+        );
+        for line in wrapped("alpha beta gamma delta epsilon", 11) {
+            assert!(line.len() <= 11, "{line:?} exceeds the value column");
+        }
+    }
+    #[test]
+    fn field_values_share_one_column_and_continuations_hang_under_it() {
+        let items = [
+            ("id".to_string(), "7".to_string()),
+            ("a much longer name".to_string(), "value".to_string()),
+            (
+                "note".to_string(),
+                "a value long enough that it has to wrap onto a second line".to_string(),
+            ),
+        ];
+        let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
+        terminal
+            .draw(|f| fields_widget(f, Rect::new(0, 0, 40, 6), &items, 0))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let lines: Vec<String> = (0..6).map(|y| row(buffer, y, 40)).collect();
+        let start = |text: &str| text.find(|c: char| !c.is_whitespace()).unwrap_or(0);
+        // Every value begins at the same offset, whatever its name's length.
+        let column = lines[0].trim_end().rfind("7").unwrap();
+        assert_eq!(lines[1].trim_end().rfind("value"), Some(column));
+        assert!(lines[1].starts_with("a much longer name"));
+        // The wrapped remainder hangs under the value, not at the left edge.
+        assert_eq!(start(&lines[3]), column);
+        assert!(
+            !lines[3].trim().is_empty(),
+            "the second line of a wrapped value should be rendered"
+        );
     }
 }

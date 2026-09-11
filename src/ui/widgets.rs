@@ -61,7 +61,7 @@ fn safe_text(s: &str) -> String {
         })
         .collect()
 }
-fn ellipsize(s: &str, width: usize) -> String {
+pub fn ellipsize(s: &str, width: usize) -> String {
     let s = safe_text(s).replace('\n', " ↵ ").replace('\t', " ");
     if Line::raw(&s).width() <= width {
         return s;
