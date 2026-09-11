@@ -170,12 +170,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     execute!(io::stdout(), EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut last_tick = Instant::now();
+    let mut last_sample = Instant::now();
     let tour_started = Instant::now();
     let mut tour_scene = 0;
     while !app.quit && !EXIT_REQUESTED.load(Ordering::Relaxed) {
         let now = Instant::now();
         app.tick(now.duration_since(last_tick).as_millis() as u64);
         last_tick = now;
+        if app.replay.is_none() && last_sample.elapsed() >= Duration::from_secs(1) {
+            app.update(model::demo());
+            last_sample = now;
+        }
         if app.probe_request.take().is_some() {
             app.status = "Live tracing requires Linux; this build supports demo and replay".into();
         }
