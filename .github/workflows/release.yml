@@ -2,6 +2,7 @@ name: Release
 on:
   push:
     tags: ['v*']
+    branches: [main]
   workflow_dispatch:
     inputs:
       tag:
@@ -13,24 +14,45 @@ permissions:
 concurrency:
   group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
 env:
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             asset: kernwatch-linux-x86_64
+            os: ubuntu-22.04
           - target: x86_64-unknown-linux-musl
             asset: kernwatch-linux-x86_64-static
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            asset: kernwatch-linux-aarch64
+            os: ubuntu-24.04-arm
+          - target: aarch64-unknown-linux-musl
+            asset: kernwatch-linux-aarch64-static
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            asset: kernwatch-macos-x86_64
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            asset: kernwatch-macos-aarch64
+            os: macos-15
+          - target: x86_64-pc-windows-msvc
+            asset: kernwatch-windows-x86_64.exe
+            os: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.RELEASE_TAG }}
       - name: Validate version tag
+        if: github.ref_type == 'tag' || inputs.tag
         run: |
           python3 - <<'PY'
           import os, re
@@ -42,6 +64,9 @@ jobs:
         run: |
           rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy --target '${{ matrix.target }}'
           rustup default 1.98.0
+      - name: Install musl linker
+        if: contains(matrix.target, 'linux-musl')
+        run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
       - name: Validate and build
@@ -54,38 +79,24 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          mkdir -p target/release
-          cp "target/$TARGET/release/kernwatch" target/release/kernwatch
-          ./target/release/kernwatch --help
-          ./target/release/kernwatch --demo --snapshot > /tmp/kernwatch-demo.json
-          python3 -m json.tool /tmp/kernwatch-demo.json > /dev/null
+          python3 scripts/release_smoke.py "$TARGET"
+      - name: Terminal smoke tests
+        if: runner.os != 'Windows'
+        run: |
           python3 scripts/pty_smoke.py
           python3 scripts/demo_smoke.py
-          if [ "$TARGET" = x86_64-unknown-linux-musl ]; then
-            if readelf -l target/release/kernwatch | grep -q INTERP; then
-              echo 'Static binary unexpectedly has a dynamic interpreter'
-              exit 1
-            fi
-            if readelf -d target/release/kernwatch | grep -q NEEDED; then
-              echo 'Static binary unexpectedly requires shared libraries'
-              exit 1
-            fi
-          fi
       - name: Package
         env:
+          TARGET: ${{ matrix.target }}
           ASSET: ${{ matrix.asset }}
-        run: |
-          mkdir -p dist
-          cp target/release/kernwatch "$ASSET"
-          tar -czf "dist/$ASSET.tar.gz" "$ASSET" LICENSE README.md
-          cd dist
-          sha256sum "$ASSET.tar.gz" > "$ASSET.tar.gz.sha256"
+        run: python3 scripts/package_binary.py "$TARGET" "$ASSET"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.asset }}
           path: dist/*
           if-no-files-found: error
   publish:
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -106,5 +117,5 @@ jobs:
           cd dist
           sha256sum --check ./*.sha256
           cat ./*.sha256 > SHA256SUMS
-          gh release create "$RELEASE_TAG" --verify-tag --draft --title "kernwatch $RELEASE_TAG" --notes-file ../docs/RELEASE_NOTES.md ./*.tar.gz ./*.sha256 SHA256SUMS
+          gh release create "$RELEASE_TAG" --verify-tag --draft --title "kernwatch $RELEASE_TAG" --notes-file ../docs/RELEASE_NOTES.md ./*.tar.gz ./*.zip ./*.sha256 SHA256SUMS
           gh release edit "$RELEASE_TAG" --draft=false

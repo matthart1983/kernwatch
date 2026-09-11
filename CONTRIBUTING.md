@@ -1,6 +1,6 @@
 # Contributing
 
-Use Linux x86-64 with Rust 1.98 or newer. Run `cargo build --locked` to fetch and build dependencies; `--offline` works once they are cached.
+Use Rust 1.98 or newer. Live collectors require Linux; macOS and Windows build the demo/replay viewer. Run `cargo build --locked` to fetch and build dependencies; `--offline` works once they are cached.
 
 Before opening a pull request:
 
@@ -23,6 +23,6 @@ Do not commit live recordings, reports, host audit output, credentials, or gener
 
 ## Binary releases
 
-Update the package version and `docs/RELEASE_NOTES.md`, then push a matching `v` tag (for example, `v0.1.0`). `.github/workflows/release.yml` builds and tests Linux x86-64 GNU and musl targets, packages executable archives with SHA-256 checksums, and publishes only after both builds pass. The manual dispatch accepts an existing tag. Existing published assets are not overwritten; a failed draft publication can be inspected and completed through GitHub Releases.
+Update the package version and `docs/RELEASE_NOTES.md`, then push a matching `v` tag (for example, `v0.1.0`). `.github/workflows/release.yml` builds and tests all seven Linux, macOS and Windows targets, packages executable archives with SHA-256 checksums, and publishes only after every build passes. The manual dispatch accepts an existing tag. Existing published assets are not overwritten; a failed draft publication can be inspected and completed through GitHub Releases.
 
 The older `scripts/package_release.py` packages a local evidence bundle and requires separate privileged VM logs. It is not the binary release pipeline.

@@ -147,11 +147,15 @@ impl Probes {
             Ok(fd) => (Some(fd), None),
             Err(e) => (None, Some(e.to_string())),
         };
+        #[cfg(target_arch = "aarch64")]
+        let object = aya::include_bytes_aligned!("../probes/kernwatch-aarch64.bpf.o");
+        #[cfg(not(target_arch = "aarch64"))]
+        let object = aya::include_bytes_aligned!("../probes/kernwatch.bpf.o");
         let mut bpf = aya::EbpfLoader::new()
             .set_global("capture_stack", &capture_stack, true)
             .set_global("target_pid", &pid, true)
             .set_global("target_cgroup", &cgroup, true)
-            .load(aya::include_bytes_aligned!("../probes/kernwatch.bpf.o"))
+            .load(object)
             .map_err(err)?;
         let mut owned_attachments = BTreeMap::new();
         for (name, attach) in programs {
@@ -868,21 +872,30 @@ impl Probes {
 }
 
 pub fn syscall_name(id: u64) -> String {
-    match id {
-        0 => "read".into(),
-        1 => "write".into(),
-        3 => "close".into(),
-        9 => "mmap".into(),
-        35 => "nanosleep".into(),
-        74 => "fsync".into(),
-        202 => "futex".into(),
-        230 => "clock_nanosleep".into(),
-        232 => "epoll_wait".into(),
-        257 => "openat".into(),
-        262 => "newfstatat".into(),
-        _ => format!("syscall_{id}"),
+    let names = [
+        (libc::SYS_read, "read"),
+        (libc::SYS_write, "write"),
+        (libc::SYS_close, "close"),
+        (libc::SYS_mmap, "mmap"),
+        (libc::SYS_nanosleep, "nanosleep"),
+        (libc::SYS_fsync, "fsync"),
+        (libc::SYS_futex, "futex"),
+        (libc::SYS_clock_nanosleep, "clock_nanosleep"),
+        (libc::SYS_epoll_pwait, "epoll_pwait"),
+        (libc::SYS_openat, "openat"),
+        (libc::SYS_newfstatat, "newfstatat"),
+    ];
+    #[cfg(target_arch = "x86_64")]
+    if id == libc::SYS_epoll_wait as u64 {
+        return "epoll_wait".into();
     }
+    names
+        .iter()
+        .find(|(number, _)| *number as u64 == id)
+        .map(|(_, name)| (*name).to_owned())
+        .unwrap_or_else(|| format!("syscall_{id}"))
 }
+
 pub fn hydrate(s: &mut crate::model::Snapshot) {
     for row in &mut s.views[9].rows {
         if row.len() >= 9
@@ -1012,5 +1025,18 @@ impl Drop for Probes {
         if self.stats.is_some() {
             ACTIVE_STATS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+}
+
+#[cfg(test)]
+mod architecture_tests {
+    #[test]
+    fn syscall_names_follow_the_target_abi() {
+        assert_eq!(super::syscall_name(libc::SYS_read as u64), "read");
+        assert_eq!(super::syscall_name(libc::SYS_openat as u64), "openat");
+        assert_eq!(
+            super::syscall_name(u64::MAX),
+            format!("syscall_{}", u64::MAX)
+        );
     }
 }

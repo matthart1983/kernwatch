@@ -1,4 +1,5 @@
 use crate::model::Snapshot;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::{
     fs::{File, OpenOptions},
@@ -14,13 +15,11 @@ pub struct Recorder {
 }
 impl Recorder {
     pub fn create(path: PathBuf) -> io::Result<Self> {
-        let mut writer = BufWriter::new(
-            OpenOptions::new()
-                .mode(0o600)
-                .create_new(true)
-                .write(true)
-                .open(&path)?,
-        );
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut writer = BufWriter::new(options.open(&path)?);
         writer.write_all(MAGIC)?;
         Ok(Self {
             writer,
@@ -188,7 +187,21 @@ pub fn export_with_actions(s: &Snapshot, actions: &[crate::actions::Plan]) -> io
             &serde_json::json!({"version":1,"demo":s.demo,"captured":s.captured,"files":manifest}),
         )?,
     )?;
-    std::fs::File::open(&staging)?.sync_all()?;
+    publish_directory(&staging, &path)?;
+    #[cfg(unix)]
+    std::fs::File::open(".")?.sync_all()?;
+    Ok(path)
+}
+pub fn stamp() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
+
+#[cfg(target_os = "linux")]
+fn publish_directory(staging: &Path, path: &Path) -> io::Result<()> {
+    std::fs::File::open(staging)?.sync_all()?;
     let from =
         std::ffi::CString::new(staging.as_os_str().as_encoded_bytes()).map_err(io::Error::other)?;
     let to =
@@ -208,12 +221,33 @@ pub fn export_with_actions(s: &Snapshot, actions: &[crate::actions::Plan]) -> io
     {
         return Err(io::Error::last_os_error());
     }
-    std::fs::File::open(".")?.sync_all()?;
-    Ok(path)
+
+    Ok(())
 }
-pub fn stamp() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
+#[cfg(target_os = "macos")]
+fn publish_directory(staging: &Path, path: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let from = std::ffi::CString::new(staging.as_os_str().as_bytes())?;
+    let to = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    File::open(staging)?.sync_all()?;
+    // SAFETY: both paths are valid NUL-terminated strings; RENAME_EXCL forbids replacement.
+    if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+#[cfg(windows)]
+fn publish_directory(staging: &Path, path: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32;
+    }
+    let from: Vec<_> = staging.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: terminated UTF-16 paths; WRITE_THROUGH is set and REPLACE_EXISTING is absent.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 8) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }

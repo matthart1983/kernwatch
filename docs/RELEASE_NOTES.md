@@ -1,29 +1,21 @@
-## kernwatch v0.1.1
+## kernwatch v0.2.0
 
-Fixes musl linking for atomic incident-report export. The v0.1.0 build did not publish a release.
+Adds every target from netwatch's release matrix, with explicit platform scope.
 
-Initial binary release of the Rust and Ratatui Linux kernel monitor, with thirteen views, a guided demo, bounded eBPF tracing, recording/replay and incident reports.
-
-### Downloads
-
-| Archive | Platform |
+| Asset | Modes |
 |---|---|
-| `kernwatch-linux-x86_64-static.tar.gz` | Linux x86-64, static musl build; recommended for portability |
-| `kernwatch-linux-x86_64.tar.gz` | Linux x86-64, glibc build produced on Ubuntu 22.04 |
+| `kernwatch-linux-x86_64.tar.gz` | Linux live monitoring, demo and replay; glibc (Ubuntu 22.04 build) |
+| `kernwatch-linux-x86_64-static.tar.gz` | Same, static musl |
+| `kernwatch-linux-aarch64.tar.gz` | Linux ARM64 live monitoring, demo and replay; glibc (Ubuntu 24.04 build) |
+| `kernwatch-linux-aarch64-static.tar.gz` | Same, static musl |
+| `kernwatch-macos-x86_64.tar.gz` | Intel macOS: demo, Linux recording replay and export |
+| `kernwatch-macos-aarch64.tar.gz` | Apple Silicon macOS: demo, Linux recording replay and export |
+| `kernwatch-windows-x86_64.exe.zip` | Windows x86-64: demo, Linux recording replay and export |
 
-Each archive includes the named executable, MIT license and README. Verify downloads against `SHA256SUMS` or the individual `.sha256` file. The BPF object is embedded; no probe compilation is required to run the application.
+Each archive contains the named executable, README and MIT license. Verify downloads with `SHA256SUMS` or the individual `.sha256` files. Rename/install the executable as `kernwatch` (`kernwatch.exe` on Windows), then run `kernwatch --demo-tour`.
 
-```sh
-tar -xzf kernwatch-linux-x86_64-static.tar.gz
-mkdir -p ~/.local/bin
-install -m 755 kernwatch-linux-x86_64-static ~/.local/bin/kernwatch
-~/.local/bin/kernwatch --demo-tour
-```
+Linux builds embed architecture-specific CO-RE probes and use the target's syscall numbers. macOS and Windows builds reject live monitoring and host controls; they do not claim native kernel monitoring.
 
-The demo uses synthetic data and requires no privileges. Run `kernwatch --view dense` for host counters; explicit eBPF capture requires kernel BTF, supported tracepoints and permissions.
+All targets run native compilation, Clippy, unit/UI tests, JSON/render checks and recording/replay checks. Unix targets also run real-terminal smoke tests. Windows terminal interaction is not automated by the Unix PTY scripts. Static builds are checked for shared-library dependencies.
 
-### Validation and scope
-
-Both release targets run formatting, Clippy, the test suite, JSON snapshot validation and real-terminal smoke tests before upload. The static build is checked for dynamic dependencies. These are user-space checks, not privileged probe-attachment certification.
-
-The pre-rename baseline passed privileged tests on kernels 6.19.10 and 7.1.13. Those tests have not been repeated on these release binaries. ARM, macOS and Windows are not supported by this release. Remaining gaps include user-stack symbolization, allocation/module-loader attribution and an interactive tracefs fallback; see `docs/GAPS.md` in the source tree.
+Privileged probe tests have not been repeated on these release binaries. Historical kernel validation covered the x86-64 pre-rename baseline; ARM64 probe attachment requires separate privileged validation. User-stack symbolization, allocation/module-loader attribution and interactive tracefs fallback remain open work.

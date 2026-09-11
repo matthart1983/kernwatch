@@ -19,6 +19,14 @@ kernwatch is a Rust + Ratatui monitor for investigating CPU contention, task sch
 - **Inspect deeper metadata:** optional systemd properties/drop-ins, module file metadata, SMART health, journal records, and BPF program/link information.
 - **Review changes before applying:** supported task, IRQ/RPS, and cgroup controls use explicit previews, target identity checks, readback, and rollback journals.
 
+| Platform | Architectures | Supported modes |
+|---|---|---|
+| Linux | x86-64, ARM64; glibc and static musl | Live counters, optional eBPF, demo, recording and replay |
+| macOS | Intel x86-64, Apple Silicon ARM64 | Demo, Linux recording replay and report export |
+| Windows | x86-64 | Demo, Linux recording replay and report export |
+
+macOS and Windows do not collect native kernel telemetry or apply host controls. Their launch commands require `--demo-tour`, `--demo` or `--replay FILE`.
+
 kernwatch is under active development. The [gap audit](docs/GAPS.md) and [requirement ledger](docs/COMPLETION.md) distinguish implemented features, environment restrictions, and remaining work.
 
 ## Demo
@@ -37,7 +45,7 @@ Demo mode needs no administrator privileges, starts no host probes and does not 
 
 ### Download a binary
 
-Get Linux x86-64 binaries from [GitHub Releases](https://github.com/matthart1983/kernwatch/releases/latest). The static musl build is recommended for portability; a glibc build is also available. While the repository is private, downloads require repository access.
+Get prebuilt binaries from [GitHub Releases](https://github.com/matthart1983/kernwatch/releases/latest). Linux builds are available for x86-64 and ARM64, with glibc and static musl variants. Static musl builds are recommended for portability. macOS (Intel and Apple Silicon) and Windows x86-64 builds support demo and replay of Linux recordings. Downloads are public.
 
 With GitHub CLI authenticated:
 
@@ -54,7 +62,7 @@ Archives include the executable, license and README. Static linking removes the 
 
 ### Build from source
 
-Requirements: **Linux x86-64**, **Rust 1.98 or newer**, and a C linker. Internet access is needed for the first dependency download.
+Requirements: **Linux x86-64 or ARM64** (live monitoring), or **macOS/Windows** (demo and replay), **Rust 1.98 or newer**, and a C linker. Internet access is needed for the first dependency download.
 
 Clone the repository and build:
 
@@ -238,7 +246,7 @@ Screenshot rendering also needs Pillow and either Adwaita Mono or DejaVu Sans Mo
 
 ## Limitations
 
-The pre-rename baseline passed tracing tests on Linux x86-64 kernels **6.19.10** and **7.1.13** in disposable VMs. The renamed build has not repeated those privileged tests. Compatibility with other kernels, architectures, drivers and security policies needs separate validation.
+The pre-rename baseline passed tracing tests on Linux x86-64 kernels **6.19.10** and **7.1.13** in disposable VMs. The renamed build has not repeated those privileged tests. The ARM64 CO-RE probe and syscall decoder use the ARM64 register ABI; privileged ARM64 probe attachment has not yet been validated. Compatibility with other kernels, drivers and security policies needs separate validation.
 
 Remaining work includes user-stack symbolization, allocation and module-loader attribution, a supported interactive tracefs fallback, BPF map occupancy/FD-holder attribution, and cross-suspend alignment of historical log timestamps. CPU/runtime counters cannot reconstruct missing historical events or establish causality on their own.
 

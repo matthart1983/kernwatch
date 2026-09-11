@@ -20,7 +20,15 @@ struct task_struct { int pid; u64 start_boottime; struct css_set *cgroups; } __a
 struct gendisk { int major; int first_minor; } __attribute__((preserve_access_index));
 struct request_queue { struct gendisk *disk; } __attribute__((preserve_access_index));
 struct request { unsigned int __data_len; struct request_queue *q; } __attribute__((preserve_access_index));
+#ifdef KERNWATCH_ARM64
+struct pt_regs { unsigned long regs[31]; } __attribute__((preserve_access_index));
+#define OPENAT_NR 56
+#define FSTATAT_NR 79
+#else
 struct pt_regs { unsigned long di,si,dx,r10,r8,r9; } __attribute__((preserve_access_index));
+#define OPENAT_NR 257
+#define FSTATAT_NR 262
+#endif
 struct ctx { u64 args[0]; };
 struct event { u64 ns,key,a,b; u32 type,cpu,pid,pad; u64 args[6]; char text[80]; };
 static u64 (*ktime)(void)=(void*)5;
@@ -41,7 +49,14 @@ SEC("raw_tp/sched_wakeup") int kw_wake(struct ctx *c){return emit(1,task_pid(c->
 SEC("raw_tp/sched_wakeup_new") int kw_wake_new(struct ctx *c){return emit(1,task_pid(c->args[0]),0,0);}
 SEC("raw_tp/sched_switch") int kw_switch(struct ctx *c){struct event *e=begin(2,task_pid(c->args[2]),task_pid(c->args[1]),c->args[0] || c->args[3] == 0);if(!e)return 0;u64 css=0,cg=0,kn=0;read_kernel(&css,8,&((struct task_struct*)c->args[2])->cgroups);read_kernel(&cg,8,&((struct css_set*)css)->dfl_cgrp);read_kernel(&kn,8,&((struct cgroup*)cg)->kn);read_kernel(&e->args[0],8,&((struct kernfs_node*)kn)->id);read_kernel(&e->args[1],8,&((struct task_struct*)c->args[2])->start_boottime);submit(e,0);return 0;}
 SEC("raw_tp/sched_process_exit") int kw_exit(struct ctx *c){return emit(3,task_pid(c->args[0]),0,0);}
-SEC("raw_tp/sys_enter") int kw_sys_enter(struct ctx *c){struct event *e=begin(4,c->args[1],0,0);if(!e)return 0;e->pad=capture_stack?(u32)stack_id(c,&stacks,256):0xffffffff;struct pt_regs *r=(void*)c->args[0];read_kernel(&e->args[0],8,&r->di);read_kernel(&e->args[1],8,&r->si);read_kernel(&e->args[2],8,&r->dx);read_kernel(&e->args[3],8,&r->r10);read_kernel(&e->args[4],8,&r->r8);read_kernel(&e->args[5],8,&r->r9);if(c->args[1]==257||c->args[1]==262)read_user_string(e->text,80,(void*)e->args[1]);submit(e,0);return 0;}
+SEC("raw_tp/sys_enter") int kw_sys_enter(struct ctx *c){struct event *e=begin(4,c->args[1],0,0);if(!e)return 0;e->pad=capture_stack?(u32)stack_id(c,&stacks,256):0xffffffff;struct pt_regs *r=(void*)c->args[0];
+#ifdef KERNWATCH_ARM64
+#pragma unroll
+for(int i=0;i<6;i++)read_kernel(&e->args[i],8,&r->regs[i]);
+#else
+read_kernel(&e->args[0],8,&r->di);read_kernel(&e->args[1],8,&r->si);read_kernel(&e->args[2],8,&r->dx);read_kernel(&e->args[3],8,&r->r10);read_kernel(&e->args[4],8,&r->r8);read_kernel(&e->args[5],8,&r->r9);
+#endif
+if(c->args[1]==OPENAT_NR||c->args[1]==FSTATAT_NR)read_user_string(e->text,80,(void*)e->args[1]);submit(e,0);return 0;}
 SEC("raw_tp/sys_exit") int kw_sys_exit(struct ctx *c){return emit(5,0,c->args[1],0);}
 SEC("raw_tp/softirq_entry") int kw_soft_enter(struct ctx *c){return emit(6,c->args[0],0,0);}
 SEC("raw_tp/softirq_exit") int kw_soft_exit(struct ctx *c){return emit(7,c->args[0],0,0);}

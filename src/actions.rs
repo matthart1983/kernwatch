@@ -57,6 +57,7 @@ impl Host for DemoHost {
     }
 }
 pub struct LinuxHost;
+#[cfg(target_os = "linux")]
 impl Host for LinuxHost {
     fn effective(&self, path: &Path) -> io::Result<String> {
         match path.file_name().and_then(|s| s.to_str()) {
@@ -121,11 +122,13 @@ impl Host for LinuxHost {
         fs::write(path, format!("{}\n", value.trim()))
     }
 }
+#[cfg(target_os = "linux")]
 fn task_target(path: &Path) -> Option<(i32, u64)> {
     let value = path.to_str()?.strip_prefix("task-affinity:")?;
     let (pid, start) = value.split_once(':')?;
     Some((pid.parse().ok()?, start.parse().ok()?))
 }
+#[cfg(target_os = "linux")]
 pub(crate) fn validate_task(pid: i32, start: u64) -> io::Result<()> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
     let end = stat
@@ -507,5 +510,21 @@ mod tests {
         assert!(parse_target("cpuset ../../tmp 0").is_err());
         assert!(validate_cpus("7-2").is_err());
         assert!(validate_cpus("0-3,7").is_ok());
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl Host for LinuxHost {
+    fn read(&self, _: &Path) -> io::Result<String> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Live host controls require Linux",
+        ))
+    }
+    fn write(&self, _: &Path, _: &str) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Live host controls require Linux",
+        ))
     }
 }
