@@ -193,9 +193,11 @@ pub fn export_with_actions(s: &Snapshot, actions: &[crate::actions::Plan]) -> io
         std::ffi::CString::new(staging.as_os_str().as_encoded_bytes()).map_err(io::Error::other)?;
     let to =
         std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(io::Error::other)?;
+    // Use the kernel syscall directly: musl does not expose a renameat2 wrapper.
     // SAFETY: valid NUL-terminated paths; Linux no-replace rename publishes the complete directory.
     if unsafe {
-        libc::renameat2(
+        libc::syscall(
+            libc::SYS_renameat2,
             libc::AT_FDCWD,
             from.as_ptr(),
             libc::AT_FDCWD,

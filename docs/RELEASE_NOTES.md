@@ -1,4 +1,6 @@
-## kernwatch v0.1.0
+## kernwatch v0.1.1
+
+Fixes musl linking for atomic incident-report export. The v0.1.0 build did not publish a release.
 
 Initial binary release of the Rust and Ratatui Linux kernel monitor, with thirteen views, a guided demo, bounded eBPF tracing, recording/replay and incident reports.
 
