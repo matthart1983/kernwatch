@@ -148,7 +148,7 @@ impl App {
         }
     }
     pub fn panel_count(&self) -> usize {
-        [4, 4, 3, 4, 3, 3, 3, 4, 3, 4, 3, 4, 8][self.tab]
+        [4, 4, 3, 4, 3, 3, 3, 4, 3, 3, 3, 4, 8][self.tab]
     }
     pub fn cursor(&self) -> u64 {
         self.time_cursor.unwrap_or(self.snapshot.telemetry.at_ms)

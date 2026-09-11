@@ -258,25 +258,21 @@ impl Collector {
         self.identities.retain(|id, _| next.contains_key(id));
         self.previous = next;
         if let Some(e) = failure {
+            // The capability carries the failure; it is never pushed into the
+            // table, where an error would read as the name of a program. The
+            // status line has room for what to do about it, so the syscall that
+            // refused is kept beside it as evidence instead.
+            if let Some(status) = t.details.get_mut("bpf.status") {
+                status.push(("enumeration".into(), e.clone()));
+            }
             t.capabilities.insert(
                 "bpf".into(),
                 if e.contains("limited to") {
-                    Quality::Error(e.clone())
+                    Quality::Error(e)
                 } else {
-                    Quality::Denied(e.clone())
+                    Quality::Denied("program inventory requires CAP_BPF or root".into())
                 },
             );
-            if rows.is_empty() {
-                rows.push(vec![
-                    "—".into(),
-                    e,
-                    "—".into(),
-                    "—".into(),
-                    "—".into(),
-                    "—".into(),
-                    "—".into(),
-                ]);
-            }
         } else {
             t.capabilities.insert("bpf".into(), Quality::Available);
         }

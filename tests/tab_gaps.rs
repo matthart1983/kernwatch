@@ -193,3 +193,43 @@ fn outstanding_scheduler_wait_completes_and_is_invalidated_by_loss() {
     c.apply(&mut t);
     assert!(t.runnable_waits.is_empty());
 }
+
+#[test]
+fn every_table_row_matches_its_column_count() {
+    // A short row silently shifts every later cell into the wrong column, which
+    // is how a failure string once landed under the eBPF creator heading.
+    let snapshot = model::demo();
+    for (tab, view) in snapshot.views.iter().enumerate() {
+        for (index, row) in view.rows.iter().enumerate() {
+            assert_eq!(
+                row.len(),
+                view.columns.len(),
+                "view {tab} row {index} has {} fields for {} columns: {row:?}",
+                row.len(),
+                view.columns.len()
+            );
+        }
+    }
+}
+
+#[test]
+fn a_denied_bpf_inventory_reports_the_permission_and_adds_no_rows() {
+    let mut a = App::new(model::demo());
+    a.switch(9);
+    a.snapshot.demo = false;
+    a.snapshot.views[9].rows.clear();
+    a.snapshot.telemetry.capabilities.insert(
+        "bpf".into(),
+        Quality::Denied("program inventory requires CAP_BPF or root".into()),
+    );
+    let screen = screen(&a, 160, 40);
+    assert!(
+        screen.contains("requires CAP_BPF or root"),
+        "the denial should name the permission it needs"
+    );
+    assert!(
+        !screen.contains("bpf_prog_get_next_id"),
+        "the refusing syscall belongs in the status detail, not the headline"
+    );
+    assert!(a.rows().is_empty(), "a denial must not synthesize a row");
+}

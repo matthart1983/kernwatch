@@ -2129,10 +2129,9 @@ fn ebpf(f: &mut Frame, r: Rect, a: &App) {
         r,
         &[
             Constraint::Length(2),
-            Constraint::Length(12),
+            Constraint::Length(20),
             Constraint::Length(11),
             Constraint::Min(9),
-            Constraint::Length(8),
         ],
     );
     controls(
@@ -2147,27 +2146,21 @@ fn ebpf(f: &mut Frame, r: Rect, a: &App) {
         a,
         "bpf",
     );
-    let tb = p(f, bands[1], a, 1, "programs", "runtime stats · one-core %");
-    let mut data = rows(a, 9);
-    for row in &mut data {
-        row.push(
-            if row.get(5).and_then(|v| v.parse::<f64>().ok()).is_some() {
-                "measured"
-            } else {
-                "stats unavailable"
-            }
-            .into(),
-        );
-    }
-    let mut columns = a.snapshot.views[9].columns.clone();
-    columns.push("verdict".into());
+    let tb = p(
+        f,
+        bands[1],
+        a,
+        1,
+        "programs",
+        ": probe … enables runtime stats · one-core %",
+    );
     history_table(
         f,
         tb,
         a,
-        &columns,
-        &data,
-        &[6, 21, 20, 12, 11, 10, 7, 17, 22, 16],
+        &a.snapshot.views[9].columns.clone(),
+        &rows(a, 9),
+        &[6, 21, 20, 12, 11, 10, 7, 17, 22],
         ("bpf.program", ""),
     );
     let de = p(f, bands[2], a, 2, "program / maps", "selected program");
@@ -2250,26 +2243,6 @@ fn ebpf(f: &mut Frame, r: Rect, a: &App) {
             false,
         );
     }
-    let probes = p(
-        f,
-        bands[4],
-        a,
-        4,
-        "one-shot probes",
-        "bounded duration · owned probes detach on exit",
-    );
-    note(
-        f,
-        probes,
-        &[
-            ": probe sched       wakeup / run-queue latency",
-            ": probe offcpu      switch-out to switch-in, including sleep",
-            ": probe irq         per-vector execution time",
-            ": probe block       request completion latency",
-            ": probe syscalls    completed calls / errors / duration",
-            ": stop-probe        stop capture and release owned probe resources",
-        ],
-    );
 }
 fn logs(f: &mut Frame, r: Rect, a: &App) {
     let bands = vertical(
