@@ -1,0 +1,17 @@
+/target/
+/dist/
+/*-report-*/
+/.*-report-*.partial/
+/*.kwr
+/*-actions-*.json
+/tests/*.txt
+/tests/*.ansi
+/tests/vm/*.log
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+/screenshots/demo/*.json
+/screenshots/demo/[0-9][0-9].png
+/screenshots/demo/*.mp4

@@ -1,0 +1,2888 @@
+use super::widgets::*;
+use crate::{app::App, domain::Telemetry};
+use ratatui::{prelude::*, widgets::*};
+fn p(f: &mut Frame, r: Rect, a: &App, n: usize, title: &str, meta: &str) -> Rect {
+    panel(f, r, n, title, meta, a.focus == n.saturating_sub(1))
+}
+fn t(a: &App) -> &Telemetry {
+    &a.snapshot.telemetry
+}
+fn value(a: &App, key: &str, unit: &str) -> String {
+    number(t(a).value(key), unit)
+}
+fn rows(a: &App, tab: usize) -> Vec<Vec<String>> {
+    if a.tab == tab {
+        a.rows()
+    } else {
+        a.snapshot.views[tab].rows.clone()
+    }
+}
+fn hist(f: &mut Frame, r: Rect, a: &App, key: &str, alarm: bool) {
+    history(f, r, t(a).series.get(key), a.cursor(), CYAN, alarm)
+}
+fn note(f: &mut Frame, r: Rect, texts: &[&str]) {
+    text(
+        f,
+        r,
+        texts.iter().map(|s| Line::raw(s.to_string())).collect(),
+    );
+}
+fn controls(f: &mut Frame, r: Rect, label: &str, a: &App) {
+    line(
+        f,
+        r,
+        format!(
+            " {label}    · g mode {}    / filter {}",
+            a.mode,
+            if a.filter.is_empty() {
+                "—"
+            } else {
+                &a.filter
+            }
+        ),
+        DIM,
+    );
+}
+fn task_latency_key(a: &App, task: &crate::domain::Task) -> String {
+    if a.snapshot.demo {
+        format!("task.{}", task.pid)
+    } else {
+        format!("task.{}.{}", task.pid, task.start_ticks)
+    }
+}
+fn task_latency_history(f: &mut Frame, r: Rect, a: &App, task: &crate::domain::Task) {
+    let key = task_latency_key(a, task);
+    if t(a)
+        .series
+        .get(&key)
+        .is_some_and(|s| s.window(a.cursor(), 60).iter().any(Option::is_some))
+    {
+        hist(f, r, a, &key, false);
+    } else {
+        let state = match t(a).capabilities.get("scheduler") {
+            Some(crate::domain::Quality::Available) => "no wakes yet",
+            Some(crate::domain::Quality::Stale) => "capture loss",
+            _ => "l capture",
+        };
+        line(f, r, state, DIM);
+    }
+}
+fn task_rows(tasks: &[&crate::domain::Task]) -> Vec<Vec<String>> {
+    tasks
+        .iter()
+        .map(|x| {
+            vec![
+                format!("{} {}", x.name, x.pid),
+                x.state.clone(),
+                x.cpu.to_string(),
+                number(x.cpu_pct, ""),
+                if x.rss_bytes == 0 {
+                    "—".into()
+                } else {
+                    format!("{:.0}M", x.rss_bytes as f64 / 1048576.)
+                },
+                latency(x.wake_p99_ms),
+                number(x.voluntary_s, ""),
+                x.wchan.clone(),
+                x.verdict.clone(),
+            ]
+        })
+        .collect()
+}
+fn tasks_panel(f: &mut Frame, r: Rect, a: &App, id: usize) {
+    let tasks = a.visible_tasks();
+    let inner = p(
+        f,
+        r,
+        a,
+        id,
+        "tasks by concern",
+        &format!(
+            "{} total · {} matched · {} shown · s sort",
+            t(a).tasks.len(),
+            tasks.len(),
+            tasks.len().min(r.height.saturating_sub(4) as usize)
+        ),
+    );
+    let with_history = inner.width >= 70;
+    let cols = if with_history {
+        horizontal(inner, &[Constraint::Min(45), Constraint::Length(13)])
+    } else {
+        horizontal(inner, &[Constraint::Percentage(100)])
+    };
+    let compact = inner.width < 100;
+    let offset = a
+        .selected
+        .saturating_sub(inner.height.saturating_sub(3) as usize);
+    let visible = tasks
+        .iter()
+        .skip(offset)
+        .take(inner.height.saturating_sub(2) as usize)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut data = task_rows(&visible);
+    for (row, task) in data.iter_mut().zip(&visible) {
+        if a.watched.contains(&(task.pid, task.start_ticks)) {
+            row[0] = format!("★ {}", row[0]);
+        }
+    }
+    if compact {
+        for row in &mut data {
+            row.remove(7);
+            row.remove(6);
+        }
+    } else {
+        for (row, task) in data.iter_mut().zip(&visible) {
+            row.insert(3, task.policy.replace("SCHED_", ""));
+            row.insert(6, latency(task.wake_p50_ms));
+            row.insert(9, number(task.involuntary_s, ""));
+        }
+    }
+    let headers: &[&str] = if compact {
+        &["task / pid", "st", "cpu", "cpu%", "rss", "p99", "verdict"]
+    } else {
+        &[
+            "task / pid",
+            "st",
+            "cpu",
+            "policy",
+            "cpu%",
+            "rss",
+            "wake p50",
+            "wake p99",
+            "vol/s",
+            "invol/s",
+            "wchan",
+            "verdict",
+        ]
+    };
+    let widths: &[u16] = if compact {
+        &[28, 4, 5, 7, 9, 11, 25]
+    } else {
+        &[24, 3, 4, 9, 6, 7, 8, 8, 7, 7, 13, 20]
+    };
+    let mut headers = headers.to_vec();
+    let mut widths = widths.to_vec();
+    if a.tab == 1 && a.grouping > 0 {
+        headers.insert(1, ["", "cgroup", "UID", "parent"][a.grouping]);
+        widths.insert(1, 18);
+        let mut previous = String::new();
+        for (row, task) in data.iter_mut().zip(&visible) {
+            let group = match a.grouping {
+                1 => task.cgroup.clone(),
+                2 => task.uid.map(|v| v.to_string()).unwrap_or("unknown".into()),
+                _ => task.parent_pid.to_string(),
+            };
+            row.insert(
+                1,
+                if group != previous {
+                    group.clone()
+                } else {
+                    String::new()
+                },
+            );
+            previous = group;
+        }
+    }
+    table(
+        f,
+        cols[0],
+        &headers,
+        &data,
+        &widths,
+        a.selected.saturating_sub(offset),
+    );
+    if with_history {
+        line(
+            f,
+            Rect::new(cols[1].x, cols[1].y, 13, 1),
+            "latency 60s",
+            DIM,
+        );
+        for (i, task) in visible.iter().enumerate() {
+            task_latency_history(
+                f,
+                Rect::new(cols[1].x, cols[1].y + 2 + i as u16, 12, 1),
+                a,
+                task,
+            );
+        }
+    }
+}
+fn cpu_panel(f: &mut Frame, r: Rect, a: &App, id: usize, side: bool) {
+    let u = t(a).cpus.iter().map(|c| c.user).sum::<f64>() / t(a).cpus.len().max(1) as f64;
+    let k = t(a)
+        .cpus
+        .iter()
+        .map(|c| c.kernel + c.softirq + c.irq)
+        .sum::<f64>()
+        / t(a).cpus.len().max(1) as f64;
+    let inner = p(
+        f,
+        r,
+        a,
+        id,
+        "cpu",
+        &format!("▲ user {u:.1}%   ▼ kernel+irq {k:.1}%"),
+    );
+    let regions = if side {
+        horizontal(
+            inner,
+            &[Constraint::Percentage(72), Constraint::Percentage(28)],
+        )
+    } else {
+        vertical(inner, &[Constraint::Min(4), Constraint::Length(3)])
+    };
+    graph(
+        f,
+        regions[0],
+        t(a).series.get("cpu.user"),
+        t(a).series.get("cpu.kernel"),
+        a.cursor(),
+    );
+    if side {
+        for (i, c) in t(a)
+            .cpus
+            .iter()
+            .enumerate()
+            .take(regions[1].height as usize)
+        {
+            let y = regions[1].y + i as u16;
+            line(
+                f,
+                Rect::new(regions[1].x, y, 5, 1),
+                format!("c{}", c.id),
+                if c.busy > 90. { GOLD } else { DIM },
+            );
+            let w = regions[1].width.saturating_sub(13);
+            hist(
+                f,
+                Rect::new(regions[1].x + 5, y, w, 1),
+                a,
+                &format!("cpu.{}", c.id),
+                c.busy > 90.,
+            );
+            line(
+                f,
+                Rect::new(regions[1].right().saturating_sub(7), y, 7, 1),
+                format!("{:>5.1}%", c.busy),
+                if c.busy > 90. { GOLD } else { FG },
+            );
+        }
+    } else {
+        let n = t(a).cpus.len().clamp(1, 16);
+        let sizes = vec![Constraint::Ratio(1, n as u32); n];
+        let cells = horizontal(regions[1], &sizes);
+        for (c, r) in t(a).cpus.iter().zip(cells.iter()) {
+            line(
+                f,
+                Rect::new(r.x, r.y, r.width, 1),
+                format!("cpu{}", c.id),
+                if c.busy > 90. { GOLD } else { DIM },
+            );
+            hist(
+                f,
+                Rect::new(r.x, r.y + 1, r.width.saturating_sub(1), 1),
+                a,
+                &format!("cpu.{}", c.id),
+                c.busy > 90.,
+            );
+            line(
+                f,
+                Rect::new(r.x, r.y + 2, r.width, 1),
+                format!("{:.0}%", c.busy),
+                if c.busy > 90. { GOLD } else { FG },
+            );
+        }
+    }
+}
+fn timeline_rows(t: &crate::domain::Telemetry) -> [(&'static str, &'static str); 5] {
+    let has = |key: &str| {
+        t.series
+            .get(key)
+            .is_some_and(|s| s.samples.iter().any(|v| v.value.is_some()))
+    };
+    [
+        if has("cpu.busy") {
+            ("CPU busy", "cpu.busy")
+        } else {
+            ("CPU user", "cpu.user")
+        },
+        if has("softirq.peak") {
+            ("softirq peak", "softirq.peak")
+        } else {
+            ("NET_RX peak", "softirq")
+        },
+        if has("sched.p99") {
+            ("sched p99", "sched.p99")
+        } else {
+            ("runnable/CPU", "runqueue")
+        },
+        if has("disk.p99") {
+            ("I/O p99", "disk.p99")
+        } else {
+            ("I/O max mean", "disk.await_max")
+        },
+        ("D-state", "dstate"),
+    ]
+}
+fn timeline(f: &mut Frame, r: Rect, a: &App, id: usize) {
+    let rows = timeline_rows(t(a));
+    let first = rows
+        .iter()
+        .filter_map(|(_, key)| {
+            t(a).series
+                .get(*key)?
+                .samples
+                .iter()
+                .find(|s| s.at_ms <= a.cursor() && s.value.is_some())
+                .map(|s| s.at_ms)
+        })
+        .min();
+    let seconds = first
+        .map(|first| {
+            a.cursor()
+                .saturating_sub(first)
+                .div_ceil(1000)
+                .clamp(1, 600)
+        })
+        .unwrap_or(600);
+    let subtitle = format!("{seconds}s collected · up to 10m · ← → cursor");
+    let inner = p(f, r, a, id, "timeline", &subtitle);
+    for (i, (label, key)) in rows.iter().enumerate() {
+        if i as u16 >= inner.height.saturating_sub(1) {
+            break;
+        }
+        let y = inner.y + i as u16;
+        line(
+            f,
+            Rect::new(inner.x, y, 13.min(inner.width), 1),
+            *label,
+            DIM,
+        );
+        let series = t(a).series.get(*key);
+        let current = series
+            .and_then(|s| s.samples.iter().rev().find(|v| v.at_ms <= a.cursor()))
+            .filter(|v| a.cursor().saturating_sub(v.at_ms) <= 1500)
+            .and_then(|v| v.value);
+        let value = current
+            .map(|v| format!("{v:.1}{}", series.map(|s| s.unit.as_str()).unwrap_or("")))
+            .unwrap_or("warming".into());
+        line(
+            f,
+            Rect::new(inner.x + 14, y, 10.min(inner.width.saturating_sub(14)), 1),
+            value,
+            CYAN,
+        );
+        let area = Rect::new(inner.x + 25, y, inner.width.saturating_sub(25), 1);
+        if series.is_some_and(|s| s.window(a.cursor(), seconds).iter().any(Option::is_some)) {
+            history_window(f, area, series, a.cursor(), CYAN, i > 0, seconds);
+        } else {
+            line(f, area, "waiting for samples", DIM);
+        }
+    }
+    if inner.height > 5 {
+        let marks = t(a)
+            .events
+            .iter()
+            .filter(|e| {
+                e.at_ms <= a.cursor()
+                    && e.at_ms >= a.cursor().saturating_sub(seconds * 1000)
+                    && !e.source.contains("syscall")
+            })
+            .rev()
+            .take(4)
+            .map(|e| {
+                format!(
+                    "▲ {} {}",
+                    clock(a, e.at_ms),
+                    e.source.split_whitespace().next().unwrap_or("event")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("    ");
+        line(
+            f,
+            Rect::new(
+                inner.x + 14,
+                inner.bottom() - 1,
+                inner.width.saturating_sub(14),
+                1,
+            ),
+            marks,
+            GOLD,
+        );
+    }
+}
+fn clock(a: &App, ms: u64) -> String {
+    if !a.snapshot.demo {
+        return format!("boot+{:.3}s", ms as f64 / 1000.);
+    }
+    let secs = 9 * 3600 + 3 * 60 + 22 + ms / 1000;
+    format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+}
+fn summary_fields(f: &mut Frame, r: Rect, a: &App, key: &str) {
+    let selected = if ["device", "module", "cgroup", "bpf"].contains(&key) {
+        a.rows()
+            .get(a.selected)
+            .and_then(|r| r.first())
+            .map(|id| format!("{key}:{id}"))
+    } else {
+        None
+    };
+    if let Some(v) = selected
+        .as_ref()
+        .and_then(|k| t(a).details.get(k))
+        .or_else(|| t(a).details.get(key))
+    {
+        fields_widget(f, r, v, if a.expanded { a.scroll } else { 0 });
+    } else {
+        line(f, r, "Acquiring source detail…", DIM);
+    }
+}
+pub fn draw(f: &mut Frame, r: Rect, a: &App) {
+    if r.height < 26 || r.width < 110 {
+        compact(f, r, a);
+        return;
+    }
+    match a.tab {
+        12 => dense(f, r, a),
+        0 => overview(f, r, a),
+        1 => tasks(f, r, a),
+        2 => scheduler(f, r, a),
+        3 => memory(f, r, a),
+        4 => block(f, r, a),
+        5 => syscalls(f, r, a),
+        6 => irq(f, r, a),
+        7 => cgroups(f, r, a),
+        8 => modules(f, r, a),
+        9 => ebpf(f, r, a),
+        10 => logs(f, r, a),
+        11 => diagnose(f, r, a),
+        _ => {}
+    }
+}
+fn softirq_traced(a: &App) -> bool {
+    a.snapshot.demo
+        || t(a).metrics.iter().any(|(key, m)| {
+            key.starts_with("softirq.cpu")
+                && key.contains(".vec")
+                && m.value.is_some()
+                && m.quality == crate::domain::Quality::Available
+        })
+}
+fn softirq_caption(a: &App) -> &'static str {
+    if softirq_traced(a) {
+        "softirq execution % by CPU"
+    } else {
+        "softirq events/s by CPU"
+    }
+}
+fn dense_irq(f: &mut Frame, r: Rect, a: &App) {
+    let tracing = softirq_traced(a);
+    let ir = p(
+        f,
+        r,
+        a,
+        4,
+        "irq / softirq",
+        if tracing {
+            "softirq execution %"
+        } else {
+            "softirq events/s"
+        },
+    );
+    if ir.height == 0 {
+        return;
+    }
+    line(f, Rect::new(ir.x, ir.y, ir.width.min(8), 1), "IRQ/s", CYAN);
+    right_line(
+        f,
+        Rect::new(ir.x + 8, ir.y, ir.width.saturating_sub(8), 1),
+        value(a, "irq.rate", ""),
+        CYAN,
+    );
+    let col = a.snapshot.views[6]
+        .columns
+        .iter()
+        .position(|c| c.to_lowercase().contains("rate"))
+        .unwrap_or(2);
+    let mut rows = rows(a, 6);
+    let rate = |row: &Vec<String>| {
+        row.get(col)
+            .and_then(|s| s.replace(',', "").parse::<f64>().ok())
+    };
+    rows.sort_by(|a, b| rate(b).unwrap_or(-1.).total_cmp(&rate(a).unwrap_or(-1.)));
+    for (i, row) in rows
+        .iter()
+        .filter(|row| rate(row).is_some())
+        .take(2)
+        .enumerate()
+    {
+        let y = ir.y + 1 + i as u16;
+        if y >= ir.bottom() {
+            break;
+        }
+        let value_width = 12.min(ir.width);
+        right_line(
+            f,
+            Rect::new(ir.x, y, ir.width.saturating_sub(value_width + 1), 1),
+            format!(
+                "{} {}",
+                row.first().map(String::as_str).unwrap_or(""),
+                row.get(1).map(String::as_str).unwrap_or("")
+            ),
+            DIM,
+        );
+        right_line(
+            f,
+            Rect::new(ir.right() - value_width, y, value_width, 1),
+            format!("{}/s", number(rate(row), "")),
+            FG,
+        );
+    }
+    let offset = if rows.iter().any(|row| rate(row).is_some()) {
+        3
+    } else {
+        1
+    };
+    if ir.height > offset {
+        softirq_matrix(
+            f,
+            Rect::new(ir.x, ir.y + offset, ir.width, ir.height - offset),
+            a,
+            true,
+        );
+    }
+}
+fn dense_scheduler(f: &mut Frame, r: Rect, a: &App) {
+    let sc = p(f, r, a, 5, "sched", "live counters / capture latency");
+    let traced = t(a)
+        .series
+        .get("sched.p99")
+        .is_some_and(|s| s.at(a.cursor()).is_some());
+    for (i, (label, key)) in [
+        if traced {
+            ("wake p99", "sched.p99")
+        } else {
+            ("runnable/CPU", "runqueue")
+        },
+        ("switches/s", "sched.switches"),
+        ("CPU PSI", "psi.cpu"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let y = sc.y + i as u16 * 2;
+        if y >= sc.bottom() {
+            break;
+        }
+        let series = t(a).series.get(*key);
+        let latest = series
+            .and_then(|s| s.at(a.cursor()))
+            .or_else(|| t(a).value(key))
+            .or_else(|| {
+                if *key == "sched.switches" && !t(a).cpus.is_empty() {
+                    t(a).cpus
+                        .iter()
+                        .map(|c| c.switches_s)
+                        .collect::<Option<Vec<_>>>()
+                        .map(|v| v.iter().sum())
+                } else {
+                    None
+                }
+            });
+        line(
+            f,
+            Rect::new(sc.x, y, sc.width, 1),
+            format!(
+                "{label} {}",
+                number(latest, series.map(|s| s.unit.as_str()).unwrap_or(""))
+            ),
+            CYAN,
+        );
+        if y + 1 < sc.bottom() {
+            hist(f, Rect::new(sc.x, y + 1, sc.width, 1), a, key, false);
+        }
+    }
+}
+fn dense(f: &mut Frame, r: Rect, a: &App) {
+    let bands = vertical(
+        r,
+        &[
+            Constraint::Length(11),
+            Constraint::Min(16),
+            Constraint::Length(8),
+        ],
+    );
+    cpu_panel(f, bands[0], a, 1, true);
+    let cols = horizontal(
+        bands[1],
+        &[
+            Constraint::Percentage(24),
+            Constraint::Percentage(26),
+            Constraint::Percentage(50),
+        ],
+    );
+    let left = vertical(
+        cols[0],
+        &[Constraint::Percentage(60), Constraint::Percentage(40)],
+    );
+    let middle = vertical(
+        cols[1],
+        &[
+            Constraint::Percentage(45),
+            Constraint::Percentage(35),
+            Constraint::Percentage(20),
+        ],
+    );
+    let m = p(
+        f,
+        left[0],
+        a,
+        2,
+        "mem",
+        &format!("{:.1} GiB total", a.snapshot.mem_total as f64 / 1024.),
+    );
+    for (i, (key, label)) in [
+        ("memory.used", "used"),
+        ("memory.cache", "cache"),
+        ("memory.slab", "slab"),
+        ("memory.available", "avail"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let y = m.y + i as u16 * 2;
+        if y >= m.bottom() {
+            break;
+        }
+        line(f, Rect::new(m.x, y, 7, 1), *label, DIM);
+        let w = m.width.saturating_sub(17);
+        meter(
+            f,
+            Rect::new(m.x + 7, y, w, 1),
+            t(a).value(key).unwrap_or(0.),
+            a.snapshot.mem_total as f64 / 1024.,
+            if *label == "slab" { GOLD } else { CYAN },
+        );
+        line(
+            f,
+            Rect::new(m.right().saturating_sub(9), y, 9, 1),
+            value(a, key, "G"),
+            FG,
+        );
+    }
+    if m.height > 8 {
+        line(
+            f,
+            Rect::new(m.x, m.bottom() - 1, m.width, 1),
+            format!("▲ dentry {}", value(a, "slab.growth", " MiB/h")),
+            GOLD,
+        );
+    }
+    let b = p(
+        f,
+        left[1],
+        a,
+        3,
+        "block",
+        &format!("{} devices", t(a).devices.len()),
+    );
+    for (i, d) in t(a).devices.iter().take(2).enumerate() {
+        let y = b.y + i as u16 * 2;
+        line(
+            f,
+            Rect::new(b.x, y, b.width, 1),
+            format!(
+                "{}  {}/{} MiB/s",
+                d.name,
+                number(d.read_mib_s, ""),
+                number(d.write_mib_s, "")
+            ),
+            CYAN,
+        );
+        hist(
+            f,
+            Rect::new(b.x + 10, y + 1, b.width.saturating_sub(11), 1),
+            a,
+            &format!("device:{}:read", d.name),
+            false,
+        );
+    }
+    if b.height > 4 {
+        line(
+            f,
+            Rect::new(b.x, b.bottom() - 1, b.width, 1),
+            format!(
+                "{} age {}",
+                if a.snapshot.demo {
+                    "FLUSH"
+                } else {
+                    "oldest request"
+                },
+                value(a, "disk.age", "ms")
+            ),
+            GOLD,
+        );
+    }
+    dense_irq(f, middle[0], a);
+    dense_scheduler(f, middle[1], a);
+    let ta = p(f, middle[2], a, 6, "taint · eBPF", "trust / overhead");
+    let taint = t(a)
+        .details
+        .get("taint")
+        .and_then(|v| v.first())
+        .map(|v| v.1.as_str())
+        .unwrap_or("unavailable");
+    note(
+        f,
+        ta,
+        &[
+            &format!("Taint {taint}"),
+            &format!(
+                "BPF own {} · total {}",
+                value(a, "bpf.own", "%"),
+                value(a, "bpf.total", "%")
+            ),
+        ],
+    );
+    tasks_panel(f, cols[2], a, 7);
+    timeline(f, bands[2], a, 8);
+}
+fn overview(f: &mut Frame, r: Rect, a: &App) {
+    let bands = vertical(
+        r,
+        &[
+            Constraint::Length(5),
+            Constraint::Length(15),
+            Constraint::Length(11),
+            Constraint::Min(8),
+            Constraint::Length(8),
+        ],
+    );
+    let cards = horizontal(bands[0], &[Constraint::Ratio(1, 5); 5]);
+    for (i, (title, key, unit, sub, warn)) in [
+        (
+            "sched latency p99",
+            "sched.p99",
+            " ms",
+            "measured wake-to-run",
+            true,
+        ),
+        (
+            "run queue",
+            "runqueue",
+            " /cpu",
+            "runnable / logical CPU",
+            false,
+        ),
+        (
+            "softirq peak CPU",
+            "softirq",
+            "%",
+            "NET_RX execution time",
+            true,
+        ),
+        ("PSI some", "psi.cpu", "%", "10s avg · CPU", false),
+        (
+            "major faults",
+            "fault.major",
+            "/s",
+            "/proc/vmstat delta",
+            false,
+        ),
+    ]
+    .iter()
+    .enumerate()
+    {
+        card(
+            f,
+            cards[i],
+            title,
+            &value(a, key, unit),
+            sub,
+            t(a).series.get(*key),
+            a.cursor(),
+            *warn
+                && t(a)
+                    .concern(if *key == "sched.p99" { "sched" } else { "irq" })
+                    .is_some(),
+        );
+    }
+    cpu_panel(f, bands[1], a, 1, false);
+    let health = p(
+        f,
+        bands[2],
+        a,
+        2,
+        "health",
+        &format!("{} findings", t(a).issues.len()),
+    );
+    for (i, (label, key, unit)) in [
+        ("sched", "sched.p99", "ms"),
+        ("irq", "softirq", "%"),
+        ("memory", "memory.used", "GiB"),
+        ("block I/O", "disk.p99", "ms"),
+        ("D-state", "dstate", ""),
+    ]
+    .iter()
+    .enumerate()
+    {
+        line(
+            f,
+            Rect::new(health.x, health.y + i as u16, 20, 1),
+            format!("● {label:<9} {}", value(a, key, unit)),
+            if t(a)
+                .concern(["sched", "irq", "memory", "block", "dstate"][i])
+                .is_some()
+            {
+                GOLD
+            } else if t(a).value(key).is_none() {
+                DIM
+            } else {
+                GREEN
+            },
+        );
+        hist(
+            f,
+            Rect::new(
+                health.x + 21,
+                health.y + i as u16,
+                health.width.saturating_sub(21),
+                1,
+            ),
+            a,
+            key,
+            t(a).concern(["sched", "irq", "memory", "block", "dstate"][i])
+                .is_some(),
+        );
+    }
+    if health.height > 6 {
+        text(
+            f,
+            Rect::new(health.x, health.y + 6, health.width, health.height - 6),
+            t(a).issues
+                .iter()
+                .take(3)
+                .map(|i| Line::raw(format!("▲ {} · {} · {}", i.title, i.subject, i.state)))
+                .collect(),
+        );
+    }
+    tasks_panel(f, bands[3], a, 3);
+    timeline(f, bands[4], a, 4);
+}
+fn tasks(f: &mut Frame, r: Rect, a: &App) {
+    let bands = vertical(
+        r,
+        &[
+            Constraint::Length(1),
+            Constraint::Length(14),
+            Constraint::Length(10),
+            Constraint::Min(7),
+            Constraint::Length(5),
+        ],
+    );
+    controls(
+        f,
+        bands[0],
+        &format!(
+            "g all / running / D / kernel / threads    G group {}",
+            ["none", "cgroup", "UID", "parent"][a.grouping]
+        ),
+        a,
+    );
+    tasks_panel(f, bands[1], a, 1);
+    let task = a.selected_task();
+    let title = task
+        .map(|x| format!("{} · pid {}", x.name, x.pid))
+        .unwrap_or("selected task".into());
+    let detail = p(f, bands[2], a, 2, &title, "task context");
+    if let Some(x) = task {
+        fields(
+            f,
+            detail,
+            &[
+                (
+                    "on CPU".into(),
+                    format!("{} · affinity {}", x.cpu, x.affinity),
+                ),
+                (
+                    "policy / nice".into(),
+                    format!(
+                        "{} / {}",
+                        x.policy,
+                        x.nice.map(|v| v.to_string()).unwrap_or("unknown".into())
+                    ),
+                ),
+                (
+                    "type / uptime".into(),
+                    format!(
+                        "{} · {}",
+                        if x.kernel_thread {
+                            "kernel thread"
+                        } else if x.pid != x.tgid {
+                            "user thread"
+                        } else {
+                            "process leader"
+                        },
+                        x.age_ms
+                            .map(|ms| format!("{}s", ms / 1000))
+                            .unwrap_or("unknown".into())
+                    ),
+                ),
+                (
+                    "CPU time".into(),
+                    format!("{} of one CPU", number(x.cpu_pct, "%")),
+                ),
+                ("wchan".into(), x.wchan.clone()),
+                ("cgroup".into(), x.cgroup.clone()),
+                (
+                    "UID / parent".into(),
+                    format!(
+                        "{} / {}",
+                        x.uid.map(|v| v.to_string()).unwrap_or("unknown".into()),
+                        x.parent_pid
+                    ),
+                ),
+                ("wakeup p99".into(), latency(x.wake_p99_ms)),
+                ("blocked age".into(), number(x.blocked_ms, "ms")),
+            ],
+        );
+    }
+    let why = p(f, bands[3], a, 3, "why waiting", "same time window · 60s");
+    let plots = vertical(
+        why,
+        &[
+            Constraint::Length(1),
+            Constraint::Min(2),
+            Constraint::Length(1),
+            Constraint::Min(2),
+            Constraint::Length(2),
+        ],
+    );
+    line(f, plots[0], "Selected task runtime · % of one CPU", DIM);
+    hist(
+        f,
+        plots[1],
+        a,
+        &task
+            .map(|x| format!("task.runtime{}", x.pid))
+            .unwrap_or_default(),
+        false,
+    );
+    line(
+        f,
+        plots[2],
+        "Wake-to-run p99 · l capture selected task (30s)",
+        DIM,
+    );
+    if let Some(task) = task {
+        task_latency_history(f, plots[3], a, task);
+    }
+
+    line(f,plots[4],"Compare the selected task against CPU and IRQ activity. Shared timing alone does not establish causality.",FG);
+    let actions = p(
+        f,
+        bands[4],
+        a,
+        4,
+        "actions",
+        "Enter follows selected subject",
+    );
+    note(
+        f,
+        actions,
+        &[
+            "↵ scheduler on selected CPU    i IRQ affinity    a affinity dry-run",
+            "c cgroup · t syscall capture · y copy identity · w watch · : probe syscalls pid=TID stack",
+        ],
+    );
+}
+fn scheduler(f: &mut Frame, r: Rect, a: &App) {
+    let bands = vertical(
+        r,
+        &[
+            Constraint::Length(1),
+            Constraint::Length(13),
+            Constraint::Min(8),
+            Constraint::Length(11),
+        ],
+    );
+    controls(
+        f,
+        bands[0],
+        "g per CPU / per task / per cgroup     M wakeup latency / runtime / CPU migrations",
+        a,
+    );
+    let subjects = a.scheduler_subjects();
+    let cp = p(
+        f,
+        bands[1],
+        a,
+        1,
+        match a.mode {
+            1 => "tasks",
+            2 => "cgroups",
+            _ => "cpus",
+        },
+        "g change subject · ↵ inspect",
+    );
+    let data = subjects
+        .iter()
+        .map(|(label, key, cpu, group)| {
+            if a.mode == 1 {
+                let task = t(a)
+                    .tasks
+                    .iter()
+                    .find(|x| key == &format!("task.{}", x.pid));
+                if let Some(x) = task {
+                    return vec![
+                        label.clone(),
+                        x.state.clone(),
+                        latency(x.wake_p99_ms),
+                        number(x.cpu_pct, "%"),
+                        x.cpu.to_string(),
+                        x.affinity.clone(),
+                        x.cgroup.clone(),
+                    ];
+                }
+            } else if a.mode == 2 {
+                let tasks = t(a)
+                    .tasks
+                    .iter()
+                    .filter(|x| Some(&x.cgroup) == group.as_ref())
+                    .collect::<Vec<_>>();
+                let measured = t(a)
+                    .series
+                    .get(key)
+                    .and_then(|s| s.samples.iter().rev().find(|v| v.at_ms <= a.cursor()))
+                    .and_then(|v| v.value);
+                let cg = t(a)
+                    .cgroups
+                    .iter()
+                    .find(|x| Some(&x.path) == group.as_ref());
+                return vec![
+                    label.clone(),
+                    tasks.iter().filter(|x| x.state == "R").count().to_string(),
+                    number(measured, "ms"),
+                    number(cg.and_then(|x| x.runtime_pct), "%"),
+                    number(cg.and_then(|x| x.throttled_ms_s), "ms/s"),
+                    cg.map(|x| x.cpus.clone()).unwrap_or_default(),
+                    "sampled direct members".into(),
+                ];
+            }
+            let c = t(a).cpus.iter().find(|c| Some(c.id) == *cpu).unwrap();
+            vec![
+                label.clone(),
+                c.runnable.map(|n| n.to_string()).unwrap_or("—".into()),
+                number(c.wake_p50_ms, "ms"),
+                number(c.wake_p99_ms, "ms"),
+                number(c.switches_s, ""),
+                number(c.migrations_s, ""),
+                format!("{:.0}", c.irq),
+                format!("{:.0}", c.softirq),
+                format!("{:.0}", c.steal),
+                t(a).tasks
+                    .iter()
+                    .filter(|x| x.cpu == c.id)
+                    .max_by(|a, b| a.cpu_pct.unwrap_or(0.).total_cmp(&b.cpu_pct.unwrap_or(0.)))
+                    .map(|x| x.name.clone())
+                    .unwrap_or("—".into()),
+                if c.softirq > 80. {
+                    "softirq storm"
+                } else {
+                    "ok"
+                }
+                .into(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let headers: &[&str] = match a.mode {
+        1 => &[
+            "task", "state", "wake p99", "runtime", "CPU", "affinity", "cgroup",
+        ],
+        2 => &[
+            "cgroup",
+            "nr_run",
+            "wake p99",
+            "runtime",
+            "throttle",
+            "cpuset",
+            "aggregation",
+        ],
+        _ => &[
+            "cpu", "nr_run", "wake p50", "wake p99", "switch/s", "migr/s", "irq%", "soft%",
+            "steal%", "top task", "verdict",
+        ],
+    };
+    history_table(
+        f,
+        cp,
+        a,
+        &headers.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        &data,
+        if a.mode == 0 {
+            &[6, 7, 10, 10, 10, 10, 7, 7, 7, 20, 18]
+        } else {
+            &[24, 7, 12, 12, 12, 18, 28]
+        },
+        ("scheduler", ""),
+    );
+    let subject = subjects.get(a.selected);
+    let c = subject.and_then(|x| x.2).unwrap_or(0);
+    let label = subject.map(|x| x.0.as_str()).unwrap_or("no subject");
+    let key = subject.map(|x| x.1.as_str()).unwrap_or("");
+    let selected_key = match a.metric {
+        1 => match a.mode {
+            1 => subject
+                .map(|x| x.1.replace("task.", "task.runtime"))
+                .unwrap_or_default(),
+            2 => format!("cgroup:{label}:cpu"),
+            _ => format!("cpu.{c}"),
+        },
+        2 => match a.mode {
+            1 => subject
+                .map(|x| x.1.replace("task.", "sched.migrations.task"))
+                .unwrap_or_default(),
+            2 => subject
+                .map(|x| x.1.replace("sched.cgroup", "sched.migrations.cgroup"))
+                .unwrap_or_default(),
+            _ => format!("sched.migrations.cpu{c}"),
+        },
+        _ => key.to_string(),
+    };
+    let key = selected_key.as_str();
+    let metric_label = match a.metric {
+        1 => "runtime · % of one CPU",
+        2 => "migration rate · capture average",
+        _ => "wakeup latency",
+    };
+
+    let plot = p(
+        f,
+        bands[2],
+        a,
+        2,
+        &format!("{label} · {metric_label}"),
+        if a.auto_scale {
+            "h histogram · z fixed scale"
+        } else {
+            "h histogram · z auto scale"
+        },
+    );
+    if a.histogram && a.metric == 0 {
+        histogram(f, plot, a, key);
+    } else if a.auto_scale {
+        let series = t(a).series.get(key).cloned().map(|mut s| {
+            s.max = s
+                .window(a.cursor(), 60)
+                .into_iter()
+                .flatten()
+                .reduce(f64::max)
+                .unwrap_or(1.)
+                .max(0.001)
+                * 1.1;
+            s
+        });
+        history(f, plot, series.as_ref(), a.cursor(), CYAN, true);
+    } else {
+        hist(f, plot, a, key, true);
+    }
+    let waiting = p(
+        f,
+        bands[3],
+        a,
+        3,
+        &format!("placement · {label}"),
+        "resident tasks · last sampled wakeup",
+    );
+    for (i, x) in t(a)
+        .tasks
+        .iter()
+        .filter(|x| {
+            if a.mode == 2 {
+                subject.and_then(|s| s.3.as_ref()) == Some(&x.cgroup)
+            } else {
+                x.cpu == c
+            }
+        })
+        .enumerate()
+        .take(6)
+    {
+        let y = waiting.y + i as u16;
+        line(f, Rect::new(waiting.x, y, 24, 1), &x.name, FG);
+        meter(
+            f,
+            Rect::new(waiting.x + 25, y, waiting.width.saturating_sub(39), 1),
+            x.wake_p99_ms.unwrap_or(0.),
+            20.,
+            if x.state == "R" { GOLD } else { CYAN },
+        );
+        line(
+            f,
+            Rect::new(waiting.right() - 13, y, 13, 1),
+            if x.state == "R" {
+                "running".into()
+            } else {
+                latency(x.wake_p99_ms)
+            },
+            FG,
+        );
+    }
+    if waiting.height > 7 {
+        line(f,Rect::new(waiting.x,waiting.bottom()-2,waiting.width,2),"Affinity and cpuset constrain placement independently. Inspect effective masks before changing either.\na preview affinity · i IRQs · ↵ selected CPU tasks",DIM);
+    }
+}
+fn memory(f: &mut Frame, r: Rect, a: &App) {
+    let bands = vertical(
+        r,
+        &[
+            Constraint::Length(1),
+            Constraint::Length(5),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Min(6),
+            Constraint::Length(9),
+        ],
+    );
+    controls(
+        f,
+        bands[0],
+        "view overview / slab / hugepages / per cgroup",
+        a,
+    );
+    let cards = horizontal(bands[1], &[Constraint::Ratio(1, 6); 6]);
+    for (i, (label, key, unit)) in [
+        ("used", "memory.used", " GiB"),
+        ("available", "memory.available", " GiB"),
+        ("page cache", "memory.cache", " GiB"),
+        ("slab", "memory.slab", " GiB"),
+        ("PSI mem", "psi.memory", "%"),
+        ("faults", "fault.minor", "/s"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        card(
+            f,
+            cards[i],
+            label,
+            &if key.starts_with("memory.") {
+                number(
+                    t(a).value(key)
+                        .map(|v| if a.memory_gib { v } else { v * 1024. }),
+                    if a.memory_gib { " GiB" } else { " MiB" },
+                )
+            } else {
+                value(a, key, unit)
+            },
+            if i == 3 {
+                "growth; cause unconfirmed"
+            } else {
+                "10s window"
+            },
+            t(a).series.get(*key),
+            a.cursor(),
+            i == 3,
+        );
+    }
+    let slab = p(
+        f,
+        bands[2],
+        a,
+        1,
+        "slab · top by size",
+        "growth requires allocation evidence",
+    );
+    if let Some(values) = t(a).details.get("slab") {
+        for (i, (label, val)) in values.iter().enumerate().take(6) {
+            line(f, Rect::new(slab.x, slab.y + i as u16, 20, 1), label, FG);
+            let n = val
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.);
+            meter(
+                f,
+                Rect::new(
+                    slab.x + 21,
+                    slab.y + i as u16,
+                    slab.width.saturating_sub(35),
+                    1,
+                ),
+                if val.contains("GiB") { n * 1024. } else { n },
+                1434.,
+                if i == 0 { GOLD } else { CYAN },
+            );
+            line(
+                f,
+                Rect::new(slab.right() - 13, slab.y + i as u16, 13, 1),
+                memory_text(val, a.memory_gib),
+                FG,
+            );
+        }
+    } else {
+        line(f, slab, "Slab cache access unavailable", DIM);
+    }
+    let numa = p(f, bands[3], a, 2, "NUMA / zones", "locality and watermarks");
+    if a.mode == 2 {
+        memory_fields(f, numa, a, "hugepages");
+    } else if a.mode == 3 {
+        let data = t(a)
+            .cgroups
+            .iter()
+            .map(|g| {
+                vec![
+                    g.path.clone(),
+                    number(
+                        Some(
+                            g.memory_bytes as f64
+                                / if a.memory_gib { 1073741824. } else { 1048576. },
+                        ),
+                        if a.memory_gib { " GiB" } else { " MiB" },
+                    ),
+                    g.fields
+                        .iter()
+                        .find(|(k, _)| k == "memory.max")
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or("—".into()),
+                ]
+            })
+            .collect::<Vec<_>>();
+        table(
+            f,
+            numa,
+            &["cgroup", "memory current", "memory limit"],
+            &data,
+            &[60, 20, 20],
+            a.selected,
+        );
+    } else {
+        memory_fields(f, numa, a, "numa");
+    }
+    let graph_r = p(
+        f,
+        bands[4],
+        a,
+        3,
+        "allocation / reclaim",
+        "▲ alloc · ▼ reclaim /s",
+    );
+    graph(
+        f,
+        graph_r,
+        t(a).series.get("alloc"),
+        t(a).series.get("reclaim"),
+        a.cursor(),
+    );
+    let rss = p(
+        f,
+        bands[5],
+        a,
+        4,
+        "process memory",
+        "PSS sampled for 32 concern tasks / 5s",
+    );
+    let divisor = if a.memory_gib { 1073741824. } else { 1048576. };
+    let memory = |v: Option<u64>| {
+        v.map(|v| format!("{:.2}", v as f64 / divisor))
+            .unwrap_or("—".into())
+    };
+    let data = a
+        .memory_tasks()
+        .iter()
+        .map(|x| {
+            vec![
+                format!("{} {}", x.name, x.pid),
+                memory(Some(x.rss_bytes)),
+                memory(x.pss_bytes),
+                memory(x.anon_bytes),
+                memory(x.file_bytes),
+                memory(x.shmem_bytes),
+                memory(x.swap_bytes),
+                number(x.minor_faults_s, ""),
+                number(x.rss_growth_bytes_s.map(|v| v / divisor), ""),
+                x.pss_at_ms
+                    .map(|at| format!("{}s", t(a).at_ms.saturating_sub(at) / 1000))
+                    .unwrap_or("—".into()),
+                x.verdict.clone(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    table(
+        f,
+        rss,
+        &[
+            "process",
+            if a.memory_gib { "RSS GiB" } else { "RSS MiB" },
+            if a.memory_gib { "PSS GiB" } else { "PSS MiB" },
+            "anon",
+            "file",
+            "shmem",
+            "swap",
+            "minor/s",
+            if a.memory_gib { "GiB/s Δ" } else { "MiB/s Δ" },
+            "PSS age",
+            "verdict",
+        ],
+        &data,
+        &[24, 9, 9, 8, 8, 8, 8, 10, 10, 9, 18],
+        a.selected,
+    );
+}
+fn block(f: &mut Frame, r: Rect, a: &App) {
+    let bands = vertical(
+        r,
+        &[
+            Constraint::Length(1),
+            Constraint::Length(10),
+            Constraint::Min(15),
+        ],
+    );
+    controls(
+        f,
+        bands[0],
+        "show devices / partitions / dm / mounts    latency block request completion",
+        a,
+    );
+    let dev = p(
+        f,
+        bands[1],
+        a,
+        1,
+        "devices",
+        "completed latency ≠ pending age",
+    );
+    history_table(
+        f,
+        dev,
+        a,
+        &crate::model::DEVICE_COLUMNS
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
+        &rows(a, 4),
+        &[14, 12, 9, 9, 9, 11, 11, 7, 8, 10],
+        ("device:", ":read"),
+    );
+    let cols = horizontal(
+        bands[2],
+        &[Constraint::Percentage(38), Constraint::Percentage(62)],
+    );
+    let detail = p(f, cols[0], a, 2, "selected block device", "queue topology");
+    summary_fields(f, detail, a, "device");
+    let graphs = p(
+        f,
+        cols[1],
+        a,
+        3,
+        "throughput / request lifecycle",
+        "▲ read · ▼ write",
+    );
+    let plots = vertical(
+        graphs,
+        &[
+            Constraint::Min(6),
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Length(3),
+        ],
+    );
+    graph(
+        f,
+        plots[0],
+        selected_device_series(a, "read"),
+        selected_device_series(a, "write"),
+        a.cursor(),
+    );
+    for (i, (key, label)) in [
+        ("disk.iops", "IOPS"),
+        ("disk.p99", "completed latency p99 · ms"),
+        ("disk.queue", "queue depth"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        line(f, plots[1 + i * 2], *label, DIM);
+        if i == 1 {
+            let device = rows(a, 4)
+                .get(a.selected)
+                .and_then(|r| r.first())
+                .and_then(|name| t(a).devices.iter().find(|d| d.name == *name));
+            let key = device
+                .map(|d| format!("block.dev{}.p99", d.major_minor))
+                .unwrap_or_else(|| key.to_string());
+            hist(f, plots[2 + i * 2], a, &key, true);
+        } else {
+            history(
+                f,
+                plots[2 + i * 2],
+                selected_device_series(a, if i == 0 { "iops" } else { "queue" }),
+                a.cursor(),
+                CYAN,
+                false,
+            );
+        }
+    }
+}
+fn histogram(f: &mut Frame, r: Rect, a: &App, key: &str) {
+    if let Some(h) = t(a).histograms.get(key) {
+        let bars = r.height.saturating_sub(2);
+        let vals = h.counts.iter().map(|n| Some(*n as f64)).collect::<Vec<_>>();
+        dots(
+            f,
+            Rect::new(r.x, r.y, r.width, bars),
+            &vals,
+            h.counts.iter().copied().max().unwrap_or(1) as f64,
+            GOLD,
+            false,
+            true,
+        );
+        line(
+            f,
+            Rect::new(r.x, r.bottom().saturating_sub(1), r.width, 1),
+            format!(
+                "log buckets ({})  {}   · n={}",
+                h.unit,
+                h.bounds
+                    .iter()
+                    .map(|v| v.to_string())
+                    .chain(
+                        (h.counts.len() > h.bounds.len())
+                            .then(|| format!(">{}", h.bounds.last().unwrap_or(&0.)))
+                    )
+                    .collect::<Vec<_>>()
+                    .join("  "),
+                h.counts.iter().sum::<u64>()
+            ),
+            DIM,
+        );
+    } else {
+        line(f, r, "Histogram acquisition unavailable", DIM);
+    }
+}
+fn syscalls(f: &mut Frame, r: Rect, a: &App) {
+    let bands = vertical(
+        r,
+        &[
+            Constraint::Length(2),
+            Constraint::Length(12),
+            Constraint::Min(10),
+            Constraint::Length(10),
+        ],
+    );
+    controls(
+        f,
+        bands[0],
+        "trace : probe syscalls [pid=TID|cgroup=PATH]   g all / errors / >1ms · E errors · u stack",
+        a,
+    );
+    let tab = p(
+        f,
+        bands[1],
+        a,
+        1,
+        "syscalls · completed calls",
+        "s sort by duration",
+    );
+    history_table(
+        f,
+        tab,
+        a,
+        &a.snapshot.views[5].columns,
+        &rows(a, 5),
+        &[18, 10, 10, 12, 10, 10, 10, 10, 10, 16],
+        ("syscall.", ".p99"),
+    );
+    let stream = p(
+        f,
+        bands[2],
+        a,
+        2,
+        "live event stream",
+        "pause follows display freeze",
+    );
+    let selected = rows(a, 5)
+        .get(a.selected)
+        .and_then(|r| r.first())
+        .cloned()
+        .unwrap_or_default();
+    let events = t(a)
+        .events
+        .iter()
+        .filter(|e| e.source.contains("syscall"))
+        .filter(|e| a.mode != 1 || e.severity == "error")
+        .filter(|e| {
+            a.mode != 2
+                || e.message
+                    .split("duration_ms=")
+                    .nth(1)
+                    .and_then(|v| v.split(|c: char| !c.is_ascii_digit() && c != '.').next())
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .is_some_and(|v| v > 1.)
+        })
+        .filter(|e| selected.is_empty() || e.message.contains(&selected))
+        .filter(|e| {
+            a.filter.is_empty()
+                || format!("{} {}", e.message, e.subject)
+                    .to_lowercase()
+                    .contains(&a.filter.to_lowercase())
+        })
+        .map(|e| Line::raw(format!("{} {}", clock(a, e.at_ms), e.message)))
+        .collect();
+    let mut events: Vec<Line<'static>> = events;
+    events.push(Line::raw(""));
+    events.push(Line::styled(
+        "Completed duration includes blocking; use scheduler tracing to isolate wakeup delay.",
+        Style::default().fg(DIM),
+    ));
+    events.push(Line::styled("Lookup errors do not establish slab allocation or a leak. : stop-probe · f pause · e export",Style::default().fg(DIM)));
+    text(f, stream, events);
+    let h = p(
+        f,
+        bands[3],
+        a,
+        3,
+        "latency distribution",
+        "completed syscall duration",
+    );
+    let selected = rows(a, 5)
+        .get(a.selected)
+        .and_then(|r| r.first())
+        .cloned()
+        .unwrap_or_default();
+    let key = format!("syscall:{selected}");
+    histogram(
+        f,
+        h,
+        a,
+        if t(a).histograms.contains_key(&key) {
+            &key
+        } else {
+            "syscall"
+        },
+    );
+}
+fn irq(f: &mut Frame, r: Rect, a: &App) {
+    let bands = vertical(
+        r,
+        &[
+            Constraint::Length(13),
+            Constraint::Length(14),
+            Constraint::Min(8),
+        ],
+    );
+    let tab = p(
+        f,
+        bands[0],
+        a,
+        1,
+        "hardware IRQs",
+        "rate · affinity · handler duration",
+    );
+    let mut data = rows(a, 6);
+    for row in &mut data {
+        row.push(
+            if row.get(4).is_some_and(|v| v.parse::<u32>().is_ok()) {
+                "single CPU"
+            } else {
+                "distributed"
+            }
+            .into(),
+        );
+    }
+    let mut columns = a.snapshot.views[6].columns.clone();
+    columns.push("placement".into());
+    history_table(
+        f,
+        tab,
+        a,
+        &columns,
+        &data,
+        &[6, 26, 12, 12, 12, 18, 12, 14],
+        ("irq.", ".rate"),
+    );
+    let matrix = p(
+        f,
+        bands[1],
+        a,
+        2,
+        softirq_caption(a),
+        "10s avg · counts are not time",
+    );
+    softirq_matrix(f, matrix, a, true);
+    let gr = p(
+        f,
+        bands[2],
+        a,
+        3,
+        "IRQ rate / softirq execution",
+        "▲ IRQ/s · ▼ softirq %",
+    );
+    graph(
+        f,
+        gr,
+        t(a).series.get(
+            &a.rows()
+                .get(a.selected)
+                .and_then(|r| r.first())
+                .map(|id| format!("irq.{id}.rate"))
+                .unwrap_or_default(),
+        ),
+        t(a).series.get(
+            &a.rows()
+                .get(a.selected)
+                .and_then(|r| r.get(4))
+                .and_then(|v| v.parse::<u32>().ok())
+                .map(|cpu| format!("softirq.cpu{cpu}"))
+                .unwrap_or_default(),
+        ),
+        a.cursor(),
+    );
+}
+fn cgroups(f: &mut Frame, r: Rect, a: &App) {
+    let bands = vertical(
+        r,
+        &[
+            Constraint::Length(1),
+            Constraint::Length(13),
+            Constraint::Length(11),
+            Constraint::Min(8),
+            Constraint::Length(5),
+        ],
+    );
+    controls(
+        f,
+        bands[0],
+        "show tree / flat / throttled / pressure    controllers cpu mem io",
+        a,
+    );
+    let tr = p(
+        f,
+        bands[1],
+        a,
+        1,
+        "cgroups",
+        "Space fold · hierarchy inclusive",
+    );
+    history_table(
+        f,
+        tr,
+        a,
+        &crate::model::CGROUP_COLUMNS
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
+        &rows(a, 7),
+        &[30, 6, 10, 16, 12, 11, 10, 9, 9, 8, 13],
+        ("cgroup:", ":cpu"),
+    );
+    let detail = p(f, bands[2], a, 2, "selected cgroup", "cgroup v2");
+    summary_fields(f, detail, a, "cgroup");
+    let why = p(
+        f,
+        bands[3],
+        a,
+        3,
+        "quota / runtime / throttling",
+        "CPU waiting does not consume quota",
+    );
+    let plots = vertical(
+        why,
+        &[
+            Constraint::Length(1),
+            Constraint::Min(2),
+            Constraint::Length(1),
+            Constraint::Min(2),
+            Constraint::Length(2),
+        ],
+    );
+    line(
+        f,
+        plots[0],
+        if a.pressure_view {
+            "CPU pressure · some avg10 %"
+        } else {
+            "CPU runtime · % of one logical CPU"
+        },
+        DIM,
+    );
+    let group = rows(a, 7)
+        .get(a.selected)
+        .and_then(|r| r.first())
+        .cloned()
+        .unwrap_or_default();
+    let runtime_key = format!("cgroup:{group}:cpu");
+    if a.pressure_view {
+        hist(f, plots[1], a, &format!("cgroup:{group}:psi.cpu"), false);
+        line(f, plots[2], "IO pressure · some avg10 %", DIM);
+        hist(f, plots[3], a, &format!("cgroup:{group}:psi.io"), false);
+    } else {
+        hist(f, plots[1], a, &runtime_key, false);
+        if let Some(g) = t(a).cgroups.iter().find(|g| g.path == group) {
+            let numbers = g
+                .quota
+                .split_whitespace()
+                .filter_map(|v| v.parse::<f64>().ok())
+                .collect::<Vec<_>>();
+            if numbers.len() == 2 && numbers[1] > 0. && plots[1].height > 0 {
+                let quota = numbers[0] / numbers[1] * 100.;
+                let max = t(a).series.get(&runtime_key).map(|s| s.max).unwrap_or(100.);
+                let y = plots[1].bottom()
+                    - 1
+                    - ((quota / max).clamp(0., 1.) * (plots[1].height - 1) as f64) as u16;
+                for x in plots[1].x..plots[1].right() {
+                    if x % 2 == 0 {
+                        f.buffer_mut().get_mut(x, y).set_char('─').set_fg(GOLD);
+                    }
+                }
+                line(
+                    f,
+                    Rect::new(plots[1].x, y, plots[1].width.min(24), 1),
+                    format!("quota {quota:.1}% / one CPU"),
+                    GOLD,
+                );
+            }
+        }
+        line(f, plots[2], "throttled milliseconds / second", DIM);
+        hist(f, plots[3], a, &format!("cgroup:{group}:throttled"), true);
+    }
+    line(
+        f,
+        plots[4],
+        "Compare measured runtime against quota; inspect ancestor limits independently.",
+        FG,
+    );
+    let ac = p(f, bands[4], a, 4, "actions", "dry-run before apply");
+    note(
+        f,
+        ac,
+        &[
+            "↵ tasks in group    c cpuset preview    Q quota preview",
+            "u inspect unit · p pressure history · y copy path",
+        ],
+    );
+}
+fn modules(f: &mut Frame, r: Rect, a: &App) {
+    let bands = vertical(
+        r,
+        &[
+            Constraint::Length(1),
+            Constraint::Length(13),
+            Constraint::Min(12),
+            Constraint::Length(9),
+        ],
+    );
+    controls(
+        f,
+        bands[0],
+        "show all / out-of-tree / unsigned / new / unused    B baseline · x mark",
+        a,
+    );
+    let tb = p(f, bands[1], a, 1, "modules", "baseline and trust");
+    table(
+        f,
+        tb,
+        &a.snapshot.views[8]
+            .columns
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        &rows(a, 8),
+        &[25, 11, 5, 20, 12, 14, 13, 14, 18],
+        a.selected,
+    );
+    let de = p(
+        f,
+        bands[2],
+        a,
+        2,
+        "module inspector",
+        "unknown metadata stays unknown",
+    );
+    summary_fields(f, de, a, "module");
+    let ta = p(
+        f,
+        bands[3],
+        a,
+        3,
+        "taint / module events",
+        "historical state persists",
+    );
+    let mut content = t(a)
+        .details
+        .get("taint")
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(k, v)| Line::raw(format!("{k}: {v}")))
+        .collect::<Vec<_>>();
+    if let Some(baseline) = t(a).details.get("module baseline") {
+        content.extend(baseline.iter().map(|(k, v)| Line::raw(format!("{k}: {v}"))));
+    }
+    content.extend(
+        t(a).events
+            .iter()
+            .filter(|e| e.subject.starts_with("module:") && e.at_ms <= a.cursor())
+            .rev()
+            .take(4)
+            .map(|e| {
+                Line::raw(format!(
+                    "{} · {} · {}",
+                    clock(a, e.at_ms),
+                    e.source,
+                    e.message
+                ))
+            }),
+    );
+    text(f, ta, content);
+}
+fn ebpf(f: &mut Frame, r: Rect, a: &App) {
+    let bands = vertical(
+        r,
+        &[
+            Constraint::Length(1),
+            Constraint::Length(12),
+            Constraint::Length(11),
+            Constraint::Min(9),
+            Constraint::Length(8),
+        ],
+    );
+    controls(
+        f,
+        bands[0],
+        "show all / this capture / other programs   / filter name or type",
+        a,
+    );
+    let tb = p(f, bands[1], a, 1, "programs", "runtime stats · one-core %");
+    let mut data = rows(a, 9);
+    for row in &mut data {
+        row.push(
+            if row.get(5).and_then(|v| v.parse::<f64>().ok()).is_some() {
+                "measured"
+            } else {
+                "stats unavailable"
+            }
+            .into(),
+        );
+    }
+    let mut columns = a.snapshot.views[9].columns.clone();
+    columns.push("verdict".into());
+    history_table(
+        f,
+        tb,
+        a,
+        &columns,
+        &data,
+        &[6, 21, 20, 12, 11, 10, 7, 17, 22, 16],
+        ("bpf.program", ""),
+    );
+    let de = p(f, bands[2], a, 2, "program / maps", "selected program");
+    summary_fields(f, de, a, "bpf");
+    let ov = p(
+        f,
+        bands[3],
+        a,
+        3,
+        "overhead by owner",
+        &format!(
+            "total {} · own {}",
+            value(a, "bpf.total", "%"),
+            value(a, "bpf.own", "%")
+        ),
+    );
+    let mut owners = std::collections::BTreeMap::<String, Option<f64>>::new();
+    for row in &a.snapshot.views[9].rows {
+        if row.len() < 8 {
+            continue;
+        }
+        let entry = owners.entry(row[7].clone()).or_insert(Some(0.));
+        *entry = entry.zip(row[5].parse::<f64>().ok()).map(|(a, b)| a + b);
+    }
+    let count = owners.len().min(5).min(ov.height as usize / 2);
+    let maximum = owners
+        .values()
+        .filter_map(|v| *v)
+        .reduce(f64::max)
+        .unwrap_or(1.)
+        .max(1.);
+    for (i, (owner, value)) in owners.iter().take(count).enumerate() {
+        let y = ov.y + i as u16 * 2;
+        line(f, Rect::new(ov.x, y, 20, 1), owner, DIM);
+        if let Some(v) = value {
+            meter(
+                f,
+                Rect::new(ov.x + 21, y, ov.width.saturating_sub(31), 1),
+                *v,
+                maximum,
+                CYAN,
+            );
+        } else {
+            line(
+                f,
+                Rect::new(ov.x + 21, y, ov.width.saturating_sub(31), 1),
+                "runtime statistics unavailable",
+                DIM,
+            );
+        }
+        line(
+            f,
+            Rect::new(ov.right() - 9, y, 9, 1),
+            number(*value, "%"),
+            FG,
+        );
+    }
+    let used = count as u16 * 2 + 1;
+    if ov.height > used + 2 {
+        hist(
+            f,
+            Rect::new(ov.x, ov.y + used, ov.width, ov.height - used),
+            a,
+            "bpf.own",
+            false,
+        );
+    }
+    let probes = p(
+        f,
+        bands[4],
+        a,
+        4,
+        "one-shot probes",
+        "bounded duration · owned probes detach on exit",
+    );
+    note(
+        f,
+        probes,
+        &[
+            ": probe sched       wakeup / run-queue latency",
+            ": probe offcpu      switch-out to switch-in, including sleep",
+            ": probe irq         per-vector execution time",
+            ": probe block       request completion latency",
+            ": probe syscalls    completed calls / errors / duration",
+            ": stop-probe        stop capture and release owned probe resources",
+        ],
+    );
+}
+fn logs(f: &mut Frame, r: Rect, a: &App) {
+    let bands = vertical(
+        r,
+        &[
+            Constraint::Length(1),
+            Constraint::Min(12),
+            Constraint::Length(7),
+            Constraint::Length(10),
+        ],
+    );
+    controls(
+        f,
+        bands[0],
+        "level all / warning / error   / filter message or source   follow newest",
+        a,
+    );
+    let log = p(
+        f,
+        bands[1],
+        a,
+        1,
+        "kernel / trace log",
+        "timestamp · source · event",
+    );
+    let events = a.visible_events();
+    let capacity = log.height as usize / 2;
+    let selected = a.selected.min(events.len().saturating_sub(1));
+    let offset = selected.saturating_sub(capacity.saturating_sub(1));
+    for (row, e) in events.iter().skip(offset).take(capacity).enumerate() {
+        let rect = Rect::new(log.x, log.y + row as u16 * 2, log.width, 2);
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::styled(
+                    format!("{} · {} · {}", clock(a, e.at_ms), e.source, e.severity),
+                    Style::default().fg(DIM),
+                ),
+                Line::styled(
+                    e.message.clone(),
+                    Style::default().fg(severity(&e.severity)),
+                ),
+            ])
+            .style(Style::default().bg(if offset + row == selected {
+                SELECT
+            } else {
+                BG
+            })),
+            rect,
+        );
+    }
+    let rate = p(f, bands[2], a, 2, "event rate", "last 10m");
+    hist(f, rate, a, "events.rate", false);
+    let trace = p(
+        f,
+        bands[3],
+        a,
+        3,
+        "tracing / correlation",
+        "acquisition health",
+    );
+    let mut lines = vec![Line::raw(format!(
+        "events retained {} · lost {}",
+        t(a).events.len(),
+        t(a).trace_drops
+    ))];
+    if let Some(scope) = t(a).details.get("probe.scope") {
+        lines.extend(scope.iter().map(|(k, v)| Line::raw(format!("{k}: {v}"))));
+    }
+    for chunk in t(a).capabilities.iter().collect::<Vec<_>>().chunks(3) {
+        lines.push(Line::raw(
+            chunk
+                .iter()
+                .map(|(k, v)| format!("{k}: {v:?}"))
+                .collect::<Vec<_>>()
+                .join(" · "),
+        ));
+    }
+    lines.push(Line::raw("↵ source evidence · c correlate in Diagnose"));
+    text(f, trace, lines);
+}
+fn diagnose(f: &mut Frame, r: Rect, a: &App) {
+    let bands = vertical(
+        r,
+        &[
+            Constraint::Length(1),
+            Constraint::Min(16),
+            Constraint::Length(9),
+            Constraint::Length(9),
+        ],
+    );
+    line(
+        f,
+        bands[0],
+        " pipeline   collect ✓    correlate ✓    rank ✓    verify pending    report",
+        DIM,
+    );
+    let cols = horizontal(
+        bands[1],
+        &[Constraint::Percentage(31), Constraint::Percentage(69)],
+    );
+    let issues = p(f, cols[0], a, 1, "issues", "by impact");
+    for (i, issue) in t(a).issues.iter().enumerate() {
+        let y = issues.y + i as u16 * 4;
+        if y + 2 >= issues.bottom() {
+            break;
+        }
+        let rect = Rect::new(issues.x, y, issues.width, 3);
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::styled(
+                    format!("▲ {}", issue.title),
+                    Style::default().fg(GOLD).bold(),
+                ),
+                Line::raw(issue.subject.clone()),
+                Line::styled(
+                    format!("since {} · {}", clock(a, issue.since_ms), issue.state),
+                    Style::default().fg(DIM),
+                ),
+            ])
+            .style(Style::default().bg(if i == a.selected { SELECT } else { BG }))
+            .wrap(Wrap { trim: false }),
+            rect,
+        );
+    }
+    let selected = t(a)
+        .issues
+        .get(a.selected.min(t(a).issues.len().saturating_sub(1)));
+    let cause = p(
+        f,
+        cols[1],
+        a,
+        2,
+        "cause chain / evidence",
+        "observed vs hypothesis",
+    );
+    if let Some(issue) = selected {
+        let n = issue.causes.len().max(1);
+        let card_w = 23u16;
+        let per_row = (cause.width / (card_w + 1)).max(1) as usize;
+        for (i, c) in issue.causes.iter().enumerate() {
+            let row = i / per_row;
+            let col = i % per_row;
+            let rect = Rect::new(
+                cause.x + col as u16 * (card_w + 1),
+                cause.y + row as u16 * 5,
+                card_w.min(cause.width),
+                4,
+            );
+            if rect.bottom() > cause.bottom() {
+                break;
+            }
+            let inner = panel(
+                f,
+                rect,
+                0,
+                &c.label,
+                if c.observed { "seen" } else { "?" },
+                false,
+            );
+            text(
+                f,
+                inner,
+                vec![Line::styled(
+                    c.detail.clone(),
+                    Style::default().fg(if c.observed { FG } else { GOLD }),
+                )],
+            );
+        }
+        let used = n.div_ceil(per_row) as u16 * 5;
+        if cause.height > used + 3 {
+            let evidence = Rect::new(cause.x, cause.y + used, cause.width, cause.height - used);
+            let data = issue
+                .evidence
+                .iter()
+                .map(|e| {
+                    vec![
+                        e.label.clone(),
+                        e.source.clone(),
+                        clock(a, e.at_ms),
+                        format!("{:.2}", e.weight),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            table(
+                f,
+                evidence,
+                &["evidence", "source", "seen", "weight"],
+                &data,
+                &[50, 25, 15, 10],
+                a.evidence_index,
+            );
+        }
+    }
+    let remediation = p(
+        f,
+        bands[2],
+        a,
+        3,
+        "remediation / verification",
+        "Enter dry-run · v verify",
+    );
+    if let Some(issue) = selected {
+        let mut lines = issue
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(i, s)| Line::raw(format!("{}  {s}", i + 1)))
+            .collect::<Vec<_>>();
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            format!("verify  {}", issue.verification),
+            Style::default().fg(CYAN),
+        ));
+        text(f, remediation, lines);
+    }
+    let report = p(
+        f,
+        bands[3],
+        a,
+        4,
+        "report preview",
+        "Markdown · e export bundle",
+    );
+    f.render_widget(
+        Paragraph::new(
+            crate::recording::report(&a.snapshot)
+                .lines()
+                .skip_while(|line| !line.starts_with("## Observations"))
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join(
+                    "
+",
+                ),
+        )
+        .wrap(Wrap { trim: false }),
+        report,
+    );
+}
+fn compact(f: &mut Frame, r: Rect, a: &App) {
+    if a.tab == 12 {
+        let bands = vertical(
+            r,
+            &[
+                Constraint::Length(5),
+                Constraint::Min(7),
+                Constraint::Length(6),
+            ],
+        );
+        cpu_panel(f, bands[0], a, 1, true);
+        let middle = horizontal(
+            bands[1],
+            &[Constraint::Percentage(50), Constraint::Percentage(50)],
+        );
+        dense_irq(f, middle[0], a);
+        dense_scheduler(f, middle[1], a);
+        timeline(f, bands[2], a, 8);
+        return;
+    }
+    let bands = vertical(r, &[Constraint::Min(8), Constraint::Length(6)]);
+    if a.tab == 0 || a.tab == 12 {
+        cpu_panel(f, bands[0], a, 1, true);
+    } else {
+        let inner = p(
+            f,
+            bands[0],
+            a,
+            1,
+            crate::model::TABS[a.tab].0,
+            "compact · Space expand",
+        );
+        let headers = a.snapshot.views[a.tab]
+            .columns
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        table(
+            f,
+            inner,
+            &headers,
+            &a.rows(),
+            &vec![1; headers.len().max(1)],
+            a.selected,
+        );
+    }
+    let inner = p(f, bands[1], a, 2, "findings / context", "d diagnose");
+    text(
+        f,
+        inner,
+        a.snapshot
+            .findings
+            .iter()
+            .take(3)
+            .map(|s| Line::raw(s.clone()))
+            .collect(),
+    );
+}
+
+fn selected_device_series<'a>(a: &'a App, suffix: &str) -> Option<&'a crate::domain::Series> {
+    let name = rows(a, 4)
+        .get(a.selected)
+        .and_then(|r| r.first())
+        .cloned()?;
+    t(a).series.get(&format!("device:{name}:{suffix}"))
+}
+
+fn softirq_matrix(f: &mut Frame, r: Rect, a: &App, header: bool) {
+    let traced = softirq_traced(a);
+    let count = ((r.width.saturating_sub(9)) / 4)
+        .min(t(a).cpus.len() as u16)
+        .min(16);
+    let offset = if header { 1 } else { 0 };
+    if header {
+        line(
+            f,
+            Rect::new(r.x, r.y, 8.min(r.width), 1),
+            if traced { "exec %" } else { "events/s" },
+            DIM,
+        );
+        for (i, cpu) in t(a).cpus.iter().take(count as usize).enumerate() {
+            right_line(
+                f,
+                Rect::new(r.x + 9 + i as u16 * 4, r.y, 4, 1),
+                cpu.id.to_string(),
+                DIM,
+            );
+        }
+    }
+    for (row, (vector, name)) in [
+        (3, "NET_RX"),
+        (4, "BLOCK"),
+        (1, "TIMER"),
+        (2, "NET_TX"),
+        (7, "SCHED"),
+        (9, "RCU"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        if row as u16 + offset >= r.height {
+            break;
+        }
+        let y = r.y + offset + row as u16;
+        right_line(f, Rect::new(r.x, y, 8, 1), *name, DIM);
+        for (i, cpu) in t(a).cpus.iter().take(count as usize).enumerate() {
+            let value = if a.snapshot.demo {
+                Some(if *vector == 3 { cpu.softirq } else { 0. })
+            } else if traced {
+                t(a).value(&format!("softirq.cpu{}.vec{vector}", cpu.id))
+            } else {
+                t(a).value(&format!("softirq.count.cpu{}.{name}", cpu.id))
+            };
+            let rect = Rect::new(r.x + 9 + i as u16 * 4, y, 4, 1);
+            right_line(
+                f,
+                rect,
+                value
+                    .map(|v| {
+                        if v >= 1000. {
+                            format!("{:>3.0}k", v / 1000.)
+                        } else {
+                            format!("{v:>3.0}")
+                        }
+                    })
+                    .unwrap_or("  —".into()),
+                if traced && value.unwrap_or(0.) > 50. {
+                    GOLD
+                } else {
+                    FG
+                },
+            );
+        }
+    }
+}
+
+/// Full-screen inspection of each numbered panel, including compact terminals.
+pub fn expanded(f: &mut Frame, r: Rect, a: &App) {
+    let key = (a.tab, a.focus);
+    match key {
+        (12, 0) | (0, 0) => cpu_panel(f, r, a, 1, true),
+        (12, 6) | (0, 2) | (1, 0) => tasks_panel(f, r, a, a.focus + 1),
+        (12, 7) | (0, 3) => timeline(f, r, a, a.focus + 1),
+        (6, 1) | (12, 3) => {
+            let inner = p(f, r, a, a.focus + 1, softirq_caption(a), "Esc close");
+            softirq_matrix(f, inner, a, true);
+        }
+        (12, 2) => {
+            let inner = p(f, r, a, 3, "block devices", "Esc close");
+            let data = t(a)
+                .devices
+                .iter()
+                .map(|d| {
+                    vec![
+                        d.name.clone(),
+                        number(d.read_mib_s, "MiB/s"),
+                        number(d.write_mib_s, "MiB/s"),
+                        d.inflight.to_string(),
+                        number(d.await_ms, "ms"),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            table(
+                f,
+                inner,
+                &["device", "read", "write", "in flight", "mean await"],
+                &data,
+                &[25, 20, 20, 15, 20],
+                a.selected,
+            );
+        }
+        (1, 3) | (7, 3) => {
+            let inner = p(f, r, a, 4, "reviewed actions", "Esc close");
+            if let Some(plan) = &a.pending_action {
+                fields(
+                    f,
+                    inner,
+                    &[
+                        ("review id".into(), plan.id.to_string()),
+                        ("target".into(), plan.target.display().to_string()),
+                        ("before".into(), plan.before.clone()),
+                        ("after".into(), plan.after.clone()),
+                        ("scope / impact".into(), plan.description.clone()),
+                        ("outcome".into(), plan.outcome.clone()),
+                    ],
+                );
+            } else {
+                note(
+                    f,
+                    inner,
+                    &[
+                        ": preview task PID START_TICKS CPUS",
+                        ": preview irq ID CPUS",
+                        ": preview quota GROUP QUOTA PERIOD",
+                        ": preview cpuset GROUP CPUS",
+                        "Apply requires the exact reviewed ID; no action is implied by inspection.",
+                    ],
+                );
+            }
+        }
+        (4, 1) | (7, 1) | (8, 1) | (9, 1) => {
+            let inner = p(f, r, a, a.focus + 1, "selected object", "Esc close");
+            summary_fields(
+                f,
+                inner,
+                a,
+                match a.tab {
+                    4 => "device",
+                    7 => "cgroup",
+                    8 => "module",
+                    _ => "bpf",
+                },
+            );
+        }
+        (3, 0) | (3, 1) | (8, 2) | (12, 5) => {
+            let inner = p(f, r, a, a.focus + 1, "source detail", "Esc close");
+            summary_fields(
+                f,
+                inner,
+                a,
+                match key {
+                    (3, 0) => "slab",
+                    (3, 1) => "numa",
+                    _ => "taint",
+                },
+            );
+        }
+        (4, 2) => {
+            let inner = p(f, r, a, 3, "device throughput", "Esc close");
+            graph(
+                f,
+                inner,
+                selected_device_series(a, "read"),
+                selected_device_series(a, "write"),
+                a.cursor(),
+            );
+        }
+        (3, 2) => {
+            let inner = p(f, r, a, 3, "allocation / reclaim", "pages/s");
+            graph(
+                f,
+                inner,
+                t(a).series.get("alloc"),
+                t(a).series.get("reclaim"),
+                a.cursor(),
+            );
+        }
+        (6, 2) => {
+            let inner = p(f, r, a, 3, "IRQ rate / NET_RX duration", "Esc close");
+            graph(
+                f,
+                inner,
+                t(a).series.get("irq.rate"),
+                t(a).series.get("softirq"),
+                a.cursor(),
+            );
+        }
+        (1, 2) | (2, 1) | (12, 4) => {
+            let inner = p(
+                f,
+                r,
+                a,
+                a.focus + 1,
+                "wakeup latency",
+                "Esc close · h histogram",
+            );
+            if a.histogram {
+                histogram(f, inner, a, "sched");
+            } else {
+                let key = if a.tab == 1 {
+                    a.selected_task()
+                        .map(|t| task_latency_key(a, t))
+                        .unwrap_or_default()
+                } else {
+                    format!(
+                        "sched.cpu{}",
+                        t(a).cpus.get(a.selected).map(|c| c.id).unwrap_or(0)
+                    )
+                };
+                graph(f, inner, t(a).series.get(&key), None, a.cursor());
+            }
+        }
+        (5, 2) => {
+            let inner = p(f, r, a, 3, "syscall latency histogram", "completed calls");
+            histogram(f, inner, a, "syscall");
+        }
+        (7, 2) => {
+            let inner = p(f, r, a, 3, "cgroup runtime / throttling", "Esc close");
+            let group = rows(a, 7)
+                .get(a.selected)
+                .and_then(|r| r.first())
+                .cloned()
+                .unwrap_or_default();
+            graph(
+                f,
+                inner,
+                t(a).series.get(&format!("cgroup:{group}:cpu")),
+                t(a).series.get(&format!("cgroup:{group}:throttled")),
+                a.cursor(),
+            );
+        }
+        (10, 0) | (5, 1) => {
+            let inner = p(
+                f,
+                r,
+                a,
+                a.focus + 1,
+                "event records",
+                "↑↓ scroll · Esc close",
+            );
+            let lines = t(a)
+                .events
+                .iter()
+                .filter(|e| a.tab != 5 || e.source.contains("syscall"))
+                .filter(|e| e.message.to_lowercase().contains(&a.filter.to_lowercase()))
+                .map(|e| Line::raw(format!("{} {} {}", clock(a, e.at_ms), e.source, e.message)))
+                .collect::<Vec<_>>();
+            f.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .scroll((a.scroll, 0)),
+                inner,
+            );
+        }
+        (10, 1) | (9, 2) => {
+            let inner = p(f, r, a, a.focus + 1, "measurement history", "Esc close");
+            graph(
+                f,
+                inner,
+                t(a).series.get(if a.tab == 10 {
+                    "events.rate"
+                } else {
+                    "bpf.own"
+                }),
+                None,
+                a.cursor(),
+            );
+        }
+        (11, _) => {
+            let inner = p(
+                f,
+                r,
+                a,
+                a.focus + 1,
+                "diagnosis / report",
+                "↑↓ scroll · Esc close",
+            );
+            let report = crate::recording::report(&a.snapshot);
+            f.render_widget(
+                Paragraph::new(report)
+                    .wrap(Wrap { trim: false })
+                    .scroll((a.scroll, 0)),
+                inner,
+            );
+        }
+        (1, 1) | (2, 2) => {
+            let inner = p(
+                f,
+                r,
+                a,
+                a.focus + 1,
+                "task placement / latency",
+                "Esc close",
+            );
+            if let Some(task) = a.selected_task() {
+                fields(
+                    f,
+                    inner,
+                    &[
+                        ("task".into(), format!("{} pid {}", task.name, task.pid)),
+                        (
+                            "identity".into(),
+                            format!("tgid {} start {}", task.tgid, task.start_ticks),
+                        ),
+                        ("state".into(), task.state.clone()),
+                        ("CPU".into(), task.cpu.to_string()),
+                        ("affinity".into(), task.affinity.clone()),
+                        ("cgroup".into(), task.cgroup.clone()),
+                        ("wchan".into(), task.wchan.clone()),
+                        ("wakeup p99".into(), number(task.wake_p99_ms, "ms")),
+                    ],
+                );
+            }
+        }
+        (12, 1) | (0, 1) => {
+            let inner = p(f, r, a, a.focus + 1, "memory / health", "Esc close");
+            let fields = t(a)
+                .metrics
+                .iter()
+                .map(|(key, m)| {
+                    (
+                        key.clone(),
+                        format!(
+                            "{} · {} · {:?}",
+                            number(m.value, &m.unit),
+                            m.source,
+                            m.quality
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>();
+            fields_widget(f, inner, &fields, a.scroll);
+        }
+        (10, 2) | (9, 3) => {
+            let inner = p(f, r, a, a.focus + 1, "probe health / controls", "Esc close");
+            let fields = t(a)
+                .capabilities
+                .iter()
+                .map(|(key, v)| (key.clone(), format!("{v:?}")))
+                .collect::<Vec<_>>();
+            fields_widget(f, inner, &fields, a.scroll);
+        }
+        _ => {
+            let inner = p(f, r, a, a.focus + 1, "focused table / actions", "Esc close");
+            let view = &a.snapshot.views[a.tab];
+            table(
+                f,
+                inner,
+                &view.columns.iter().map(String::as_str).collect::<Vec<_>>(),
+                &a.rows(),
+                &vec![1; view.columns.len().max(1)],
+                a.selected,
+            );
+        }
+    }
+}
+fn fields_widget(f: &mut Frame, r: Rect, items: &[(String, String)], scroll: u16) {
+    let lines = items
+        .iter()
+        .map(|(k, v)| Line::raw(format!("{k}: {v}")))
+        .collect::<Vec<_>>();
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        r,
+    );
+}
+
+fn history_table(
+    f: &mut Frame,
+    area: Rect,
+    a: &App,
+    columns: &[String],
+    data: &[Vec<String>],
+    widths: &[u16],
+    (prefix, suffix): (&str, &str),
+) {
+    let parts = horizontal(area, &[Constraint::Min(40), Constraint::Length(12)]);
+    let mut table_area = parts[0];
+    if columns
+        .first()
+        .is_some_and(|s| s.eq_ignore_ascii_case("irq"))
+    {
+        table_area.width = table_area.width.saturating_sub(1);
+    }
+    table(
+        f,
+        table_area,
+        &columns.iter().map(String::as_str).collect::<Vec<_>>(),
+        data,
+        widths,
+        a.selected,
+    );
+    line(f, Rect::new(parts[1].x, parts[1].y, 12, 1), "history", DIM);
+    let count = area.height.saturating_sub(2) as usize;
+    let offset = a
+        .selected
+        .min(data.len().saturating_sub(1))
+        .saturating_sub(count.saturating_sub(1));
+    for (i, row) in data.iter().skip(offset).take(count).enumerate() {
+        if let Some(id) = row.first() {
+            hist(
+                f,
+                Rect::new(parts[1].x, parts[1].y + 2 + i as u16, 12, 1),
+                a,
+                &if prefix == "scheduler" {
+                    a.scheduler_subjects()
+                        .get(offset + i)
+                        .map(|s| s.1.clone())
+                        .unwrap_or_default()
+                } else {
+                    format!("{prefix}{id}{suffix}")
+                },
+                false,
+            );
+        }
+    }
+}
+
+fn memory_text(value: &str, gib: bool) -> String {
+    let mut tokens = value
+        .split_whitespace()
+        .map(String::from)
+        .collect::<Vec<_>>();
+    for i in 1..tokens.len() {
+        if let Ok(number) = tokens[i - 1].parse::<f64>() {
+            if tokens[i] == "GiB" && !gib {
+                tokens[i - 1] = format!("{:.1}", number * 1024.);
+                tokens[i] = "MiB".into();
+            } else if tokens[i] == "MiB" && gib {
+                tokens[i - 1] = format!("{:.3}", number / 1024.);
+                tokens[i] = "GiB".into();
+            }
+        }
+    }
+    tokens.join(" ")
+}
+fn memory_fields(f: &mut Frame, area: Rect, a: &App, key: &str) {
+    if let Some(values) = t(a).details.get(key) {
+        text(
+            f,
+            area,
+            values
+                .iter()
+                .map(|(k, v)| Line::raw(format!("{k}: {}", memory_text(v, a.memory_gib))))
+                .collect(),
+        );
+    } else {
+        summary_fields(f, area, a, key);
+    }
+}
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+    #[test]
+    fn newly_started_timeline_displays_all_five_measured_lanes() {
+        let mut a = App::new(crate::model::demo());
+        a.snapshot.telemetry.series.clear();
+        a.snapshot.telemetry.at_ms = 50_000;
+        for key in [
+            "cpu.busy",
+            "softirq.peak",
+            "runqueue",
+            "disk.await_max",
+            "dstate",
+        ] {
+            a.snapshot.telemetry.record(key, Some(2.), "", 100.);
+        }
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 8)).unwrap();
+        terminal.draw(|f| timeline(f, f.size(), &a, 8)).unwrap();
+        for y in 1..=5 {
+            let line = (0..100)
+                .map(|x| terminal.backend().buffer().get(x, y).symbol())
+                .collect::<String>();
+            assert!(line.contains("2.0"), "missing value: {line}");
+            assert!(
+                line.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)),
+                "missing plotted data: {line}"
+            );
+        }
+    }
+    #[test]
+    fn timeline_uses_live_counters_without_probes_and_preserves_captured_percentiles() {
+        let mut t = crate::domain::Telemetry::default();
+        for key in [
+            "cpu.busy",
+            "softirq.peak",
+            "runqueue",
+            "disk.await_max",
+            "dstate",
+        ] {
+            t.record(key, Some(2.), "", 100.);
+        }
+        assert_eq!(
+            timeline_rows(&t).map(|(_, key)| key),
+            [
+                "cpu.busy",
+                "softirq.peak",
+                "runqueue",
+                "disk.await_max",
+                "dstate"
+            ]
+        );
+        t.record("sched.p99", Some(3.), "ms", 5.);
+        t.record("disk.p99", Some(4.), "ms", 5.);
+        assert_eq!(timeline_rows(&t)[2], ("sched p99", "sched.p99"));
+        assert_eq!(timeline_rows(&t)[3], ("I/O p99", "disk.p99"));
+    }
+}
