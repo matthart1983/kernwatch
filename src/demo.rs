@@ -1,7 +1,7 @@
 //! Reproducible synthetic tour. Uses the same application and renderer as interactive mode.
 use crate::{app::App, model};
 pub const SECONDS_PER_SCENE: u64 = 5;
-pub const SCENES: [(&str, usize, &str, &str); 8] = [
+pub const SCENES: [(&str, usize, &str, &str); 9] = [
     (
         "Dense: identify the CPU3 scheduling incident",
         12,
@@ -41,6 +41,12 @@ pub const SCENES: [(&str, usize, &str, &str); 8] = [
     (
         "Cgroups: inspect service quota and placement",
         7,
+        "incident",
+        "",
+    ),
+    (
+        "eBPF: attribute kernel CPU to the programs loaded on the host",
+        9,
         "incident",
         "",
     ),
