@@ -4,7 +4,7 @@ Local validation of the renamed kernwatch checkout, 11 September 2026. These res
 
 ## Current checkout
 
-- `cargo test --locked`: **70 passing tests** (31 library, 9 behaviour, 6 layout, 24 workflow). Coverage includes parsing, identity, navigation, thirteen layouts, recording recovery, replay, exports, action previews, rollback and demo scene safety.
+- `cargo test --locked`: **72 passing tests** on Linux (32 library, 9 behaviour, 6 layout, 1 portable recording/export, 24 workflow). Coverage includes parsing, identity, navigation, thirteen layouts, recording recovery, replay, exports, action previews, rollback and demo scene safety.
 - `cargo clippy --locked --all-targets -- -D warnings` and `cargo fmt --check`: passed.
 - `cargo build --release --locked`: passed.
 - `python3 scripts/pty_smoke.py`: passed keyboard navigation, resize, recording, freeze, export, normal shutdown, SIGTERM and terminal restoration.
@@ -18,7 +18,7 @@ Generated test logs are local, ignored artifacts. Reproduce the commands above t
 
 Before the rename and guided demo changes, the kwatch baseline passed privileged smoke tests on Fedora kernels `6.19.10-300.fc44.x86_64` and `7.1.13-200.fc44.x86_64` in disposable QEMU guests. Those tests exercised scheduler/IRQ/syscall/block probes, task-scoped capture, BPF inventory, event loss, and application/rollback of affinity and cgroup controls. The renamed checkout has not repeated that VM validation, and historical raw host/VM logs are not included here.
 
-The shipped probe argument decoder targets Linux x86-64 with kernel BTF and raw tracepoints. Other kernels and architectures need their own attach and lifecycle tests.
+Architecture-specific probe objects target Linux x86-64 and ARM64 with kernel BTF and raw tracepoints. ARM64 builds pass native user-space tests, but privileged ARM64 attachment has not yet been validated. Other kernels need their own attach and lifecycle tests.
 
 To reproduce privileged validation, build the `probe_smoke` release example, run `tests/vm/build_initramfs.py`, and boot its generated initramfs with a compatible kernel and an expendable virtio disk. `KERNWATCH_DISPOSABLE_GUEST=1` is set only by the guest init. That mode writes `/dev/vda`; never set it for a host test.
 

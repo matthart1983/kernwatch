@@ -227,7 +227,7 @@ python3 scripts/pty_smoke.py
 python3 scripts/demo_smoke.py
 ```
 
-The tests cover parsing, task identity, navigation, replay, reports, action workflows, and Ratatui layout buffers. The GitHub Actions workflow is configured for these checks, including terminal and guided-demo smoke tests. Local validation passes all 70 tests, formatting, Clippy and both smoke scripts. Privileged kernel validation is separate; see [validation evidence and its scope](docs/VALIDATION.md).
+The tests cover parsing, task identity, navigation, replay, reports, action workflows, and Ratatui layout buffers. The GitHub Actions workflow is configured for these checks, including terminal and guided-demo smoke tests. Local validation passes all 72 Linux tests, formatting, Clippy and both smoke scripts. Privileged kernel validation is separate; see [validation evidence and its scope](docs/VALIDATION.md).
 
 Rebuild the embedded probes after changing their C source:
 

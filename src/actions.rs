@@ -439,6 +439,22 @@ pub fn validate_cpus(s: &str) -> io::Result<()> {
     }
     Ok(())
 }
+#[cfg(not(target_os = "linux"))]
+impl Host for LinuxHost {
+    fn read(&self, _: &Path) -> io::Result<String> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Live host controls require Linux",
+        ))
+    }
+    fn write(&self, _: &Path, _: &str) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Live host controls require Linux",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,21 +526,5 @@ mod tests {
         assert!(parse_target("cpuset ../../tmp 0").is_err());
         assert!(validate_cpus("7-2").is_err());
         assert!(validate_cpus("0-3,7").is_ok());
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-impl Host for LinuxHost {
-    fn read(&self, _: &Path) -> io::Result<String> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Live host controls require Linux",
-        ))
-    }
-    fn write(&self, _: &Path, _: &str) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Live host controls require Linux",
-        ))
     }
 }
