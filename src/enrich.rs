@@ -40,6 +40,24 @@ fn kv(p: &str) -> BTreeMap<String, String> {
 fn leading(s: &str) -> Option<f64> {
     s.split_whitespace().next()?.parse().ok()
 }
+/// Slowest mean completed await across whole devices.
+///
+/// Mean await is undefined without completions, but a device whose rate was
+/// measured as zero completions is an observed idle second rather than
+/// uncollected time, so it reports zero and the history keeps its baseline.
+/// A device with no rate yet — the first sample after start or after the
+/// device is replaced — still reports nothing and leaves the second blank.
+pub fn await_max(devices: &[Device]) -> Option<f64> {
+    let whole = || devices.iter().filter(|d| !d.partition);
+    whole()
+        .filter_map(|d| d.await_ms)
+        .reduce(f64::max)
+        .or_else(|| {
+            whole()
+                .any(|d| d.iops.is_some_and(|iops| iops <= 0.))
+                .then_some(0.)
+        })
+}
 impl Enricher {
     pub fn enrich(&mut self, s: &mut Snapshot) {
         let dt = self.last.elapsed().as_secs_f64().max(0.001);
@@ -596,12 +614,7 @@ impl Enricher {
             }
         }
         self.topology.sample(&mut t);
-        let await_max = t
-            .devices
-            .iter()
-            .filter(|d| !d.partition)
-            .filter_map(|d| d.await_ms)
-            .reduce(f64::max);
+        let await_max = await_max(&t.devices);
         t.record(
             "disk.await_max",
             await_max,
@@ -820,5 +833,46 @@ mod softirq_tests {
                 (7, "TIMER".into(), 30)
             ]
         );
+    }
+}
+#[cfg(test)]
+mod await_tests {
+    use crate::domain::Device;
+    fn device(partition: bool, await_ms: Option<f64>, iops: Option<f64>) -> Device {
+        Device {
+            partition,
+            await_ms,
+            iops,
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn an_observed_idle_disk_holds_the_baseline_and_an_unrated_one_stays_blank() {
+        // Zero completions is an observation, so the second reports zero.
+        assert_eq!(super::await_max(&[device(false, None, Some(0.))]), Some(0.));
+        // No rate yet: nothing was observed, so the second stays blank.
+        assert_eq!(super::await_max(&[device(false, None, None)]), None);
+        assert_eq!(super::await_max(&[]), None);
+    }
+    #[test]
+    fn the_slowest_whole_device_wins_over_idle_peers_and_partitions() {
+        assert_eq!(
+            super::await_max(&[
+                device(false, Some(1.5), Some(8.)),
+                device(false, None, Some(0.)),
+                device(false, Some(4.2), Some(3.)),
+            ]),
+            Some(4.2)
+        );
+        // Partitions double-count their parent device and are excluded.
+        assert_eq!(
+            super::await_max(&[
+                device(true, Some(9.9), Some(2.)),
+                device(false, Some(1.0), Some(2.)),
+            ]),
+            Some(1.0)
+        );
+        // A partition alone leaves nothing to report.
+        assert_eq!(super::await_max(&[device(true, None, Some(0.))]), None);
     }
 }

@@ -830,6 +830,11 @@ impl Probes {
                 },
             );
             t.record("disk.p99", Some(v), "ms", v.max(5.));
+        } else if (self.mode == "block" || self.mode == "all") && elapsed > 0. {
+            // The block probe is attached and has seen no completion yet. That
+            // is an observed idle disk, so hold the baseline instead of leaving
+            // the history blank until the first request lands.
+            t.record("disk.p99", Some(0.), "ms", 5.);
         }
         if let Some(age) = self
             .pending
