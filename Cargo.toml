@@ -1,6 +1,6 @@
 [package]
 name = "kernwatch"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Linux kernel observability in a Rust and Ratatui terminal"
 repository = "https://github.com/matthart1983/kernwatch"
