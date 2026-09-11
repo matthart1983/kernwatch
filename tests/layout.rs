@@ -186,3 +186,47 @@ fn dense_keeps_irq_and_scheduler_visible_without_tracing_at_compact_and_full_siz
         }
     }
 }
+
+#[test]
+fn syscall_histogram_and_bpf_metadata_never_use_another_subject() {
+    let mut a = App::new(model::demo());
+    a.switch(5);
+    let name = a.rows()[a.selected][0].clone();
+    a.snapshot
+        .telemetry
+        .histograms
+        .remove(&format!("syscall:{name}"));
+    for expanded in [false, true] {
+        a.expanded = expanded;
+        a.focus = 2;
+        let mut terminal = Terminal::new(TestBackend::new(160, 60)).unwrap();
+        terminal.draw(|f| ui::draw(f, &a)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text.contains("Histogram acquisition unavailable"));
+    }
+    a.expanded = false;
+    a.switch(9);
+    let id = a.rows()[a.selected][0].clone();
+    a.snapshot.telemetry.details.remove(&format!("bpf:{id}"));
+    a.snapshot.telemetry.details.insert(
+        "bpf".into(),
+        vec![("wrong".into(), "UNRELATED PROGRAM".into())],
+    );
+    let mut terminal = Terminal::new(TestBackend::new(160, 60)).unwrap();
+    terminal.draw(|f| ui::draw(f, &a)).unwrap();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(!text.contains("UNRELATED PROGRAM"));
+    assert!(text.contains("Selected source detail unavailable"));
+}

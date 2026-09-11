@@ -29,6 +29,27 @@ impl Collector {
         let mut rows = Vec::new();
         let mut next = BTreeMap::new();
         let mut failure = None;
+        t.details.insert(
+            "bpf.status".into(),
+            [
+                ("JIT", "/proc/sys/net/core/bpf_jit_enable"),
+                (
+                    "unprivileged disabled",
+                    "/proc/sys/kernel/unprivileged_bpf_disabled",
+                ),
+                ("global stats", "/proc/sys/kernel/bpf_stats_enabled"),
+            ]
+            .into_iter()
+            .map(|(name, path)| {
+                (
+                    name.into(),
+                    std::fs::read_to_string(path)
+                        .map(|v| v.trim().to_owned())
+                        .unwrap_or("unavailable".into()),
+                )
+            })
+            .collect(),
+        );
         let links = crate::bpf_metadata::links();
         let mut inspections = 0;
         let enabled = crate::probes::statistics_active()
@@ -150,17 +171,14 @@ impl Collector {
                         ));
                     }
                     for mid in &mapids {
-                        if let Ok(m) = aya::maps::MapInfo::from_id(*mid) {
-                            details.push((
-                                format!("map {mid}"),
-                                format!(
-                                    "{} {:?} · {} entries",
-                                    m.name_as_str().unwrap_or("?"),
-                                    m.map_type(),
-                                    m.max_entries()
-                                ),
-                            ));
-                        }
+                        let description = match aya::maps::MapInfo::from_id(*mid) {
+                            Ok(m) => format!("{} {} · max_entries={} · key {}B / value {}B · occupancy unavailable",
+                                m.name_as_str().unwrap_or("?"),
+                                m.map_type().map(|kind|format!("{kind:?}")).unwrap_or("unknown".into()),
+                                m.max_entries(), m.key_size(), m.value_size()),
+                            Err(error) => format!("metadata unavailable: {error}"),
+                        };
+                        details.push((format!("map {mid}"), description));
                     }
                     t.details.insert(format!("bpf:{id}"), details.clone());
                     if rows.is_empty() {
@@ -175,7 +193,9 @@ impl Collector {
                     rows.push(vec![
                         id.to_string(),
                         info.name_as_str().unwrap_or("?").into(),
-                        format!("{:?}", info.program_type().ok()),
+                        info.program_type()
+                            .map(|kind| format!("{kind:?}"))
+                            .unwrap_or("unknown".into()),
                         rate,
                         mean,
                         cpu,
@@ -189,7 +209,7 @@ impl Collector {
                 }
             }
         }
-        if enabled {
+        if enabled && failure.is_none() {
             let measured = rows
                 .iter()
                 .filter_map(|r| r.get(5)?.parse::<f64>().ok())

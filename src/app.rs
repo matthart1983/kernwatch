@@ -455,6 +455,48 @@ impl App {
             .get(self.selected.min(tasks.len().saturating_sub(1)))
             .copied()
     }
+    pub fn visible_syscall_events(&self) -> Vec<&crate::domain::Event> {
+        let rows = self.rows();
+        let selected = rows.get(self.selected).and_then(|row| row.first());
+        let query = self.filter.to_lowercase();
+        let mut events: Vec<_> = self
+            .snapshot
+            .telemetry
+            .events
+            .iter()
+            .filter(|event| event.source.contains("syscall"))
+            .filter(|event| {
+                selected.is_none_or(|name| {
+                    event
+                        .message
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .split('(')
+                        .next()
+                        == Some(name.as_str())
+                })
+            })
+            .filter(|event| self.mode != 1 || event.severity == "error")
+            .filter(|event| {
+                self.mode != 2
+                    || event
+                        .message
+                        .split("duration_ms=")
+                        .nth(1)
+                        .and_then(|v| v.split(|c: char| !c.is_ascii_digit() && c != '.').next())
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .is_some_and(|v| v > 1.)
+            })
+            .filter(|event| {
+                format!("{} {}", event.message, event.subject)
+                    .to_lowercase()
+                    .contains(&query)
+            })
+            .collect();
+        events.sort_by_key(|event| std::cmp::Reverse(event.at_ms));
+        events
+    }
     pub fn visible_events(&self) -> Vec<&crate::domain::Event> {
         let query = self.filter.to_lowercase();
         let mut events = self
@@ -647,7 +689,7 @@ impl App {
         if self.tab == 5 && self.mode == 2 {
             rows.retain(|r| {
                 r.get(5)
-                    .and_then(|v| v.trim_end_matches("ms").parse::<f64>().ok())
+                    .and_then(|v| duration_ms(v))
                     .is_some_and(|v| v > 1.)
             });
         }
@@ -678,10 +720,18 @@ impl App {
                 let av = a.get(column).map(String::as_str).unwrap_or("");
                 let bv = b.get(column).map(String::as_str).unwrap_or("");
                 match (
-                    av.replace(',', "").parse::<f64>(),
-                    bv.replace(',', "").parse::<f64>(),
+                    if self.tab == 5 && (4..=6).contains(&column) {
+                        duration_ms(av)
+                    } else {
+                        av.replace(',', "").parse::<f64>().ok()
+                    },
+                    if self.tab == 5 && (4..=6).contains(&column) {
+                        duration_ms(bv)
+                    } else {
+                        bv.replace(',', "").parse::<f64>().ok()
+                    },
                 ) {
-                    (Ok(a), Ok(b)) => a.total_cmp(&b),
+                    (Some(a), Some(b)) => a.total_cmp(&b),
                     _ => av.cmp(bv),
                 }
             });
@@ -1898,4 +1948,26 @@ pub fn clipboard_base64(bytes: &[u8]) -> String {
         });
     }
     out
+}
+
+/// Parse a displayed duration into milliseconds without lexicographic ordering.
+pub fn duration_ms(value: &str) -> Option<f64> {
+    for (suffix, scale) in [
+        ("ms", 1.),
+        ("µs", 0.001),
+        ("μs", 0.001),
+        ("us", 0.001),
+        ("ns", 0.000001),
+        ("s", 1000.),
+    ] {
+        if let Some(number) = value.trim().strip_suffix(suffix) {
+            return number
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|n| n.is_finite())
+                .map(|n| n * scale);
+        }
+    }
+    None
 }

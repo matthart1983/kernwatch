@@ -883,7 +883,14 @@ pub fn incident() -> Telemetry {
             t.events.push(Event { id:format!("syscall-{name}-{i}"),at_ms:t.at_ms-5000+i*100,source:"syscall trace · fixture".into(),severity:if ret < 0 { "error" } else { "info" }.into(),subject:format!("task:{pid}"),message:format!("{name} PID={pid} args=[fixture sample {i}] ret={ret} duration_ms={duration}; {}",if ret == -2 { "ENOENT" } else if ret == -11 { "EAGAIN" } else { "completed" }) });
         }
     }
-    for (name, p99) in [("newfstatat", 0.009), ("epoll_wait", 22.), ("fsync", 1.9)] {
+    for (name, p99) in [
+        ("newfstatat", 0.009),
+        ("epoll_wait", 22.),
+        ("fsync", 1.9),
+        ("read", 0.031),
+        ("write", 0.048),
+        ("futex", 0.4),
+    ] {
         let bounds = vec![p99 / 16., p99 / 4., p99 / 2., p99, p99 * 2.];
         t.histograms.insert(
             format!("syscall:{name}"),

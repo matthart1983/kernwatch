@@ -707,18 +707,18 @@ impl Probes {
                         .iter()
                         .filter(|((syscall, _), _)| syscall == id)
                         .max_by_key(|(_, n)| *n)
-                        .map(|((_, errno), _)| format!("errno {errno}"))
+                        .map(|((_, errno), _)| errno_name(*errno))
                         .unwrap_or("—".into()),
                     format!(
-                        "{:.3}ms",
+                        "{:.6}ms",
                         values.iter().sum::<f64>() / values.len().max(1) as f64
                     ),
                     format!(
-                        "{:.3}ms",
+                        "{:.6}ms",
                         crate::tracing::percentile(values, 0.99).unwrap_or(0.)
                     ),
                     format!(
-                        "{:.3}ms",
+                        "{:.6}ms",
                         values.iter().copied().reduce(f64::max).unwrap_or(0.)
                     ),
                     self.correlator
@@ -871,6 +871,28 @@ impl Probes {
     }
 }
 
+pub fn errno_name(errno: i64) -> String {
+    match errno as i32 {
+        libc::EPERM => "EPERM".into(),
+        libc::ENOENT => "ENOENT".into(),
+        libc::ESRCH => "ESRCH".into(),
+        libc::EINTR => "EINTR".into(),
+        libc::EIO => "EIO".into(),
+        libc::EBADF => "EBADF".into(),
+        libc::EAGAIN => "EAGAIN".into(),
+        libc::ENOMEM => "ENOMEM".into(),
+        libc::EACCES => "EACCES".into(),
+        libc::EFAULT => "EFAULT".into(),
+        libc::EEXIST => "EEXIST".into(),
+        libc::EINVAL => "EINVAL".into(),
+        libc::ENOSPC => "ENOSPC".into(),
+        libc::EPIPE => "EPIPE".into(),
+        libc::ENOSYS => "ENOSYS".into(),
+        libc::ETIMEDOUT => "ETIMEDOUT".into(),
+        libc::ECONNREFUSED => "ECONNREFUSED".into(),
+        _ => format!("errno {errno}"),
+    }
+}
 pub fn syscall_name(id: u64) -> String {
     let names = [
         (libc::SYS_read, "read"),

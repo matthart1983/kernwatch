@@ -227,7 +227,7 @@ python3 scripts/pty_smoke.py
 python3 scripts/demo_smoke.py
 ```
 
-The tests cover parsing, task identity, navigation, replay, reports, action workflows, and Ratatui layout buffers. The GitHub Actions workflow is configured for these checks, including terminal and guided-demo smoke tests. Local validation passes all 72 Linux tests, formatting, Clippy and both smoke scripts. Privileged kernel validation is separate; see [validation evidence and its scope](docs/VALIDATION.md).
+The tests cover parsing, task identity, navigation, replay, reports, action workflows, and Ratatui layout buffers. The GitHub Actions workflow is configured for these checks, including terminal and guided-demo smoke tests. Local validation passes all 74 Linux tests, formatting, Clippy and both smoke scripts. Privileged kernel validation is separate; see [validation evidence and its scope](docs/VALIDATION.md).
 
 Rebuild the embedded probes after changing their C source:
 
@@ -250,7 +250,7 @@ The pre-rename baseline passed tracing tests on Linux x86-64 kernels **6.19.10**
 
 Remaining work includes user-stack symbolization, allocation and module-loader attribution, a supported interactive tracefs fallback, BPF map occupancy/FD-holder attribution, and cross-suspend alignment of historical log timestamps. CPU/runtime counters cannot reconstruct missing historical events or establish causality on their own.
 
-See the [gap audit](docs/GAPS.md) for scope and the [specification](docs/SPEC.md) for the intended product.
+See the [Syscalls/eBPF review](docs/SYSCALL_EBPF_REVIEW.md) for the latest tab findings and the [gap audit](docs/GAPS.md) for scope and the [specification](docs/SPEC.md) for the intended product.
 
 ## License
 

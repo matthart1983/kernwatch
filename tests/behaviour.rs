@@ -219,3 +219,62 @@ fn dense_is_zero_and_b_opens_bpf() {
     press(&mut a, KeyCode::Char('b'));
     assert_eq!(a.tab, 9);
 }
+
+#[test]
+fn syscall_sort_compares_durations_and_stream_matches_exact_names() {
+    let mut a = App::new(model::demo());
+    a.switch(5);
+    a.snapshot.views[5].rows = ["12ms", "900µs", "2ms"]
+        .into_iter()
+        .enumerate()
+        .map(|(i, d)| {
+            vec![
+                format!("call{i}"),
+                "1".into(),
+                "0".into(),
+                "—".into(),
+                d.into(),
+                d.into(),
+                d.into(),
+                "1".into(),
+                "1".into(),
+                "completed".into(),
+            ]
+        })
+        .collect();
+    a.sort = 6; // p99 is column 5; sort indexes are one-based.
+    assert_eq!(
+        a.rows().iter().map(|r| r[0].as_str()).collect::<Vec<_>>(),
+        vec!["call1", "call2", "call0"]
+    );
+    a.mode = 2;
+    assert_eq!(a.rows().len(), 2);
+    a.mode = 0;
+    a.sort = 0;
+    a.snapshot.views[5].rows[0][0] = "read".into();
+    a.snapshot.telemetry.events = [
+        (1, "read", "info"),
+        (3, "pread64", "error"),
+        (2, "read", "error"),
+    ]
+    .into_iter()
+    .map(|(at, name, severity)| kernwatch::domain::Event {
+        id: at.to_string(),
+        at_ms: at,
+        source: "syscall trace".into(),
+        message: format!("{name} PID=1 ret=-1 duration_ms=2"),
+        subject: "task:1".into(),
+        severity: severity.into(),
+    })
+    .collect();
+    assert_eq!(
+        a.visible_syscall_events()
+            .iter()
+            .map(|e| e.at_ms)
+            .collect::<Vec<_>>(),
+        vec![2, 1]
+    );
+    a.mode = 1;
+    a.snapshot.views[5].rows[0][2] = "1".into();
+    assert_eq!(a.visible_syscall_events().len(), 1);
+}

@@ -4,7 +4,7 @@ Local validation of the renamed kernwatch checkout, 11 September 2026. These res
 
 ## Current checkout
 
-- `cargo test --locked`: **72 passing tests** on Linux (32 library, 9 behaviour, 6 layout, 1 portable recording/export, 24 workflow). Coverage includes parsing, identity, navigation, thirteen layouts, recording recovery, replay, exports, action previews, rollback and demo scene safety.
+- `cargo test --locked`: **74 passing tests** on Linux (32 library, 10 behaviour, 7 layout, 1 portable recording/export, 24 workflow). Coverage includes parsing, identity, navigation, thirteen layouts, recording recovery, replay, exports, action previews, rollback and demo scene safety.
 - `cargo clippy --locked --all-targets -- -D warnings` and `cargo fmt --check`: passed.
 - `cargo build --release --locked`: passed.
 - `python3 scripts/pty_smoke.py`: passed keyboard navigation, resize, recording, freeze, export, normal shutdown, SIGTERM and terminal restoration.

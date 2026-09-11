@@ -216,7 +216,7 @@ impl Correlator {
                             }
                             .into(),
                             message: format!(
-                                "{} pid{} {} {} duration_ms={:.3}",
+                                "{} pid{} {} {} duration_ms={:.6}",
                                 crate::probes::syscall_name(id),
                                 e.pid,
                                 arguments,

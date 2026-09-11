@@ -33,7 +33,17 @@ fn controls(f: &mut Frame, r: Rect, label: &str, a: &App) {
         r,
         format!(
             " {label}    · g mode {}    / filter {}",
-            a.mode,
+            match a.tab {
+                5 => ["all", "negative returns", "p99 >1ms"]
+                    .get(a.mode)
+                    .unwrap_or(&"all")
+                    .to_string(),
+                9 => ["all programs", "this capture", "other programs"]
+                    .get(a.mode)
+                    .unwrap_or(&"all programs")
+                    .to_string(),
+                _ => a.mode.to_string(),
+            },
             if a.filter.is_empty() {
                 "—"
             } else {
@@ -430,14 +440,51 @@ fn summary_fields(f: &mut Frame, r: Rect, a: &App, key: &str) {
     } else {
         None
     };
-    if let Some(v) = selected
+    let values = selected
         .as_ref()
         .and_then(|k| t(a).details.get(k))
-        .or_else(|| t(a).details.get(key))
-    {
-        fields_widget(f, r, v, if a.expanded { a.scroll } else { 0 });
+        .or_else(|| {
+            if key == "bpf" && selected.is_some() {
+                None
+            } else {
+                t(a).details.get(key)
+            }
+        });
+    if let Some(v) = values {
+        if key == "bpf" && !a.expanded {
+            let mut fields = v.clone();
+            fields.sort_by_key(|(name, _)| match name.as_str() {
+                "owner" | "creator UID" => 0,
+                "attachment" | "attach" => 1,
+                "runtime statistics" => 2,
+                "helpers" => 3,
+                name if name.starts_with("map") => 4,
+                "JIT bytes" | "translated bytes" | "code" => 5,
+                _ => 6,
+            });
+            let height = r.height.saturating_sub(1);
+            fields_widget(f, Rect::new(r.x, r.y, r.width, height), &fields, 0);
+            if fields.len() > height as usize {
+                line(
+                    f,
+                    Rect::new(r.x, r.y + height, r.width, 1),
+                    format!(
+                        "{} more fields · focus this panel, Space expand · ↑↓ scroll",
+                        fields.len() - height as usize
+                    ),
+                    DIM,
+                );
+            }
+        } else {
+            fields_widget(f, r, v, if a.expanded { a.scroll } else { 0 });
+        }
     } else {
-        line(f, r, "Acquiring source detail…", DIM);
+        line(
+            f,
+            r,
+            "Selected source detail unavailable · : capabilities",
+            DIM,
+        );
     }
 }
 pub fn draw(f: &mut Frame, r: Rect, a: &App) {
@@ -1581,6 +1628,12 @@ fn syscalls(f: &mut Frame, r: Rect, a: &App) {
         "trace : probe syscalls [pid=TID|cgroup=PATH]   g all / errors / >1ms · E errors · u stack",
         a,
     );
+    capture_status(
+        f,
+        Rect::new(bands[0].x, bands[0].y + 1, bands[0].width, 1),
+        a,
+        "syscalls",
+    );
     let tab = p(
         f,
         bands[1],
@@ -1589,12 +1642,20 @@ fn syscalls(f: &mut Frame, r: Rect, a: &App) {
         "syscalls · completed calls",
         "s sort by duration",
     );
+    let mut display_rows = rows(a, 5);
+    for row in &mut display_rows {
+        for value in row.iter_mut().skip(4).take(3) {
+            if let Some(ms) = crate::app::duration_ms(value) {
+                *value = latency(Some(ms));
+            }
+        }
+    }
     history_table(
         f,
         tab,
         a,
         &a.snapshot.views[5].columns,
-        &rows(a, 5),
+        &display_rows,
         &[18, 10, 10, 12, 10, 10, 10, 10, 10, 16],
         ("syscall.", ".p99"),
     );
@@ -1606,35 +1667,19 @@ fn syscalls(f: &mut Frame, r: Rect, a: &App) {
         "live event stream",
         "pause follows display freeze",
     );
-    let selected = rows(a, 5)
-        .get(a.selected)
-        .and_then(|r| r.first())
-        .cloned()
-        .unwrap_or_default();
-    let events = t(a)
-        .events
-        .iter()
-        .filter(|e| e.source.contains("syscall"))
-        .filter(|e| a.mode != 1 || e.severity == "error")
-        .filter(|e| {
-            a.mode != 2
-                || e.message
-                    .split("duration_ms=")
-                    .nth(1)
-                    .and_then(|v| v.split(|c: char| !c.is_ascii_digit() && c != '.').next())
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .is_some_and(|v| v > 1.)
-        })
-        .filter(|e| selected.is_empty() || e.message.contains(&selected))
-        .filter(|e| {
-            a.filter.is_empty()
-                || format!("{} {}", e.message, e.subject)
-                    .to_lowercase()
-                    .contains(&a.filter.to_lowercase())
-        })
-        .map(|e| Line::raw(format!("{} {}", clock(a, e.at_ms), e.message)))
+    let events = a
+        .visible_syscall_events()
+        .into_iter()
+        .take(stream.height.saturating_sub(3) as usize)
+        .map(|e| Line::raw(format!("{} {}", event_clock(a, e.at_ms), e.message)))
         .collect();
     let mut events: Vec<Line<'static>> = events;
+    if events.is_empty() {
+        events.push(Line::styled(
+            "No completed events match this syscall and filter",
+            Style::default().fg(DIM),
+        ));
+    }
     events.push(Line::raw(""));
     events.push(Line::styled(
         "Completed duration includes blocking; use scheduler tracing to isolate wakeup delay.",
@@ -1642,30 +1687,21 @@ fn syscalls(f: &mut Frame, r: Rect, a: &App) {
     ));
     events.push(Line::styled("Lookup errors do not establish slab allocation or a leak. : stop-probe · f pause · e export",Style::default().fg(DIM)));
     text(f, stream, events);
+    let selected = rows(a, 5)
+        .get(a.selected)
+        .and_then(|r| r.first())
+        .cloned()
+        .unwrap_or_default();
     let h = p(
         f,
         bands[3],
         a,
         3,
         "latency distribution",
-        "completed syscall duration",
+        &format!("{selected} · completed duration"),
     );
-    let selected = rows(a, 5)
-        .get(a.selected)
-        .and_then(|r| r.first())
-        .cloned()
-        .unwrap_or_default();
     let key = format!("syscall:{selected}");
-    histogram(
-        f,
-        h,
-        a,
-        if t(a).histograms.contains_key(&key) {
-            &key
-        } else {
-            "syscall"
-        },
-    );
+    histogram(f, h, a, &key);
 }
 fn irq(f: &mut Frame, r: Rect, a: &App) {
     let bands = vertical(
@@ -1945,7 +1981,7 @@ fn ebpf(f: &mut Frame, r: Rect, a: &App) {
     let bands = vertical(
         r,
         &[
-            Constraint::Length(1),
+            Constraint::Length(2),
             Constraint::Length(12),
             Constraint::Length(11),
             Constraint::Min(9),
@@ -1957,6 +1993,12 @@ fn ebpf(f: &mut Frame, r: Rect, a: &App) {
         bands[0],
         "show all / this capture / other programs   / filter name or type",
         a,
+    );
+    capture_status(
+        f,
+        Rect::new(bands[0].x, bands[0].y + 1, bands[0].width, 1),
+        a,
+        "bpf",
     );
     let tb = p(f, bands[1], a, 1, "programs", "runtime stats · one-core %");
     let mut data = rows(a, 9);
@@ -1988,7 +2030,7 @@ fn ebpf(f: &mut Frame, r: Rect, a: &App) {
         bands[3],
         a,
         3,
-        "overhead by owner",
+        "overhead by owner / creator UID",
         &format!(
             "total {} · own {}",
             value(a, "bpf.total", "%"),
@@ -2003,10 +2045,12 @@ fn ebpf(f: &mut Frame, r: Rect, a: &App) {
         let entry = owners.entry(row[7].clone()).or_insert(Some(0.));
         *entry = entry.zip(row[5].parse::<f64>().ok()).map(|(a, b)| a + b);
     }
+    let mut owners: Vec<_> = owners.into_iter().collect();
+    owners.sort_by(|a, b| b.1.unwrap_or(-1.).total_cmp(&a.1.unwrap_or(-1.)));
     let count = owners.len().min(5).min(ov.height as usize / 2);
     let maximum = owners
-        .values()
-        .filter_map(|v| *v)
+        .iter()
+        .filter_map(|(_, v)| *v)
         .reduce(f64::max)
         .unwrap_or(1.)
         .max(1.);
@@ -2037,6 +2081,19 @@ fn ebpf(f: &mut Frame, r: Rect, a: &App) {
         );
     }
     let used = count as u16 * 2 + 1;
+    if ov.height > count as u16 * 2 {
+        line(
+            f,
+            Rect::new(ov.x, ov.y + count as u16 * 2, ov.width, 1),
+            format!(
+                "{} / {} owner groups shown · own probe history · {} drops",
+                count,
+                owners.len(),
+                t(a).trace_drops
+            ),
+            DIM,
+        );
+    }
     if ov.height > used + 2 {
         hist(
             f,
@@ -2589,7 +2646,12 @@ pub fn expanded(f: &mut Frame, r: Rect, a: &App) {
         }
         (5, 2) => {
             let inner = p(f, r, a, 3, "syscall latency histogram", "completed calls");
-            histogram(f, inner, a, "syscall");
+            let selected = rows(a, 5)
+                .get(a.selected)
+                .and_then(|r| r.first())
+                .cloned()
+                .unwrap_or_default();
+            histogram(f, inner, a, &format!("syscall:{selected}"));
         }
         (7, 2) => {
             let inner = p(f, r, a, 3, "cgroup runtime / throttling", "Esc close");
@@ -2615,10 +2677,13 @@ pub fn expanded(f: &mut Frame, r: Rect, a: &App) {
                 "event records",
                 "↑↓ scroll · Esc close",
             );
-            let lines = t(a)
-                .events
-                .iter()
-                .filter(|e| a.tab != 5 || e.source.contains("syscall"))
+            let events = if a.tab == 5 {
+                a.visible_syscall_events()
+            } else {
+                t(a).events.iter().collect()
+            };
+            let lines = events
+                .into_iter()
                 .filter(|e| e.message.to_lowercase().contains(&a.filter.to_lowercase()))
                 .map(|e| Line::raw(format!("{} {} {}", clock(a, e.at_ms), e.source, e.message)))
                 .collect::<Vec<_>>();
@@ -2826,6 +2891,63 @@ fn memory_fields(f: &mut Frame, area: Rect, a: &App, key: &str) {
     } else {
         summary_fields(f, area, a, key);
     }
+}
+
+fn event_clock(a: &App, ms: u64) -> String {
+    if a.snapshot.demo {
+        format!("{}.{:03}", clock(a, ms), ms % 1000)
+    } else {
+        clock(a, ms)
+    }
+}
+fn capture_status(f: &mut Frame, r: Rect, a: &App, source: &str) {
+    let state = if a.snapshot.demo {
+        "demo fixture".to_owned()
+    } else {
+        format!(
+            "{:?}",
+            t(a).capabilities
+                .get(source)
+                .unwrap_or(&crate::domain::Quality::Stopped)
+        )
+    };
+    let scope = t(a)
+        .details
+        .get("probe.scope")
+        .and_then(|fields| fields.iter().find(|(k, _)| k == "scope"))
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("no active capture scope");
+    let extra = if source == "bpf" {
+        t(a).details
+            .get("bpf.status")
+            .map(|fields| {
+                fields
+                    .iter()
+                    .map(|(k, v)| format!("{k} {v}"))
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            })
+            .unwrap_or_else(|| {
+                if a.snapshot.demo {
+                    "synthetic inventory".into()
+                } else {
+                    "inventory status unavailable".into()
+                }
+            })
+    } else {
+        scope.into()
+    };
+    line(
+        f,
+        r,
+        format!(
+            "{state} · {extra} · drops {} · probe CPU {} · ingest {}",
+            t(a).trace_drops,
+            value(a, "bpf.own", "%"),
+            value(a, "trace.ingest_cpu", "%")
+        ),
+        DIM,
+    );
 }
 
 #[cfg(test)]
