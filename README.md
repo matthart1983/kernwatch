@@ -25,7 +25,7 @@ kernwatch is under active development. The [gap audit](docs/GAPS.md) and [requir
 
 ## Demo
 
-Explore a simulated scheduling incident across eight views: Dense → Tasks → Scheduler → IRQ → Memory → Block → Cgroups → Diagnose. The tour connects delayed Envoy workers with CPU placement, interrupt activity and resource pressure, then presents evidence for investigation.
+Explore a simulated scheduling incident across nine views: Dense → Tasks → Scheduler → IRQ → Memory → Block → Cgroups → eBPF → Diagnose. The tour connects delayed Envoy workers with CPU placement, interrupt activity and resource pressure, then presents evidence for investigation.
 
 ```sh
 ./target/release/kernwatch --demo-tour

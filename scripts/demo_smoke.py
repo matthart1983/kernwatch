@@ -3,6 +3,8 @@ from pathlib import Path
 import re, os, pty, fcntl, termios, struct, subprocess, tempfile, time, select
 root=Path(__file__).resolve().parents[1]
 exe=root/'target/release/kernwatch'
+# Read the scene count from the tour itself; a new scene renumbers the caption.
+scenes=int(re.search(r'SCENES:\s*\[\([^\]]*\);\s*(\d+)\]',(root/'src/demo.rs').read_text()).group(1))
 with tempfile.TemporaryDirectory(prefix='kernwatch-demo-test-') as work:
     master,slave=pty.openpty()
     original=termios.tcgetattr(slave)
@@ -17,7 +19,7 @@ with tempfile.TemporaryDirectory(prefix='kernwatch-demo-test-') as work:
                 except OSError:break
     try:
         drain(0.8)
-        assert b'DEMO TOUR 1/8' in output,'guided demo did not start'
+        assert f'DEMO TOUR 1/{scenes}'.encode() in output,'guided demo did not start'
         drain(5.2)
         # Resize forces a full redraw; ordinary terminal diffs omit unchanged letters.
         fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',52,159,0,0))
