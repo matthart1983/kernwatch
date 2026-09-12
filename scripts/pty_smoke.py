@@ -34,7 +34,7 @@ def run(terminate=False):
   assert records and reports,'record/export commands failed'
   replay=subprocess.run([str(exe),'--replay',str(records[0]),'--snapshot'],capture_output=True,text=True,check=True)
   assert json.loads(replay.stdout)['demo'],'recorded demo cannot be replayed'
-  manifest=json.loads((reports[0]/'manifest.json').read_text());assert len(manifest['files'])==8
+  manifest=json.loads((reports[0]/'manifest.json').read_text());assert len(manifest['files'])==9
   (root/'tests'/('pty-signal.ansi' if terminate else 'pty-tour.ansi')).write_bytes(data)
   print(f'PASS {"SIGTERM" if terminate else "keyboard"}: resize, navigation, record/freeze/export, terminal cleanup; {len(data)} output bytes')
  os.close(master);os.close(slave)
