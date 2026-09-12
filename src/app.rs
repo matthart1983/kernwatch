@@ -22,6 +22,21 @@ pub struct Route {
     pub focus: usize,
     pub cursor: Option<u64>,
 }
+/// A thing the Flame view can profile: a process, or one thread of one.
+#[derive(Clone, Debug)]
+pub struct FlameSubject {
+    pub name: String,
+    pub tgid: u32,
+    /// The thread a capture attaches to; the probe filters on a thread id.
+    pub tid: u32,
+    pub threads: usize,
+    pub cpu_pct: f64,
+    pub rss_bytes: u64,
+    pub cgroup: String,
+    /// Name of the thread `tid` refers to, which may differ from the process.
+    pub busiest: String,
+}
+
 pub struct App {
     pub capabilities_view: bool,
     pub reviewing_action: bool,
@@ -36,7 +51,7 @@ pub struct App {
     pub flame_zoom: Vec<String>,
     /// The thread a profile was requested for, so the view can say whose
     /// stacks it draws rather than only how many.
-    pub flame_target: Option<crate::domain::Task>,
+    pub flame_target: Option<FlameSubject>,
     /// Set while the reader asked for the thread list back, so a profile that
     /// is already drawn can still be replaced by another.
     pub flame_choosing: bool,
@@ -1415,21 +1430,18 @@ impl App {
             KeyCode::Char('c') if self.tab == 3 => {
                 self.drill(1);
                 self.status =
-                    "Select a process, Enter inspect, then : probe syscalls pid=TID seconds=10"
-                        .into();
+                    "Select a process, Enter inspect, then P to profile its stacks".into();
             }
             KeyCode::Char('z') if self.tab == 2 => self.auto_scale = !self.auto_scale,
             KeyCode::Char('u') if self.tab == 5 => {
-                if let Some(pid) = self
+                match self
                     .rows()
                     .get(self.selected)
                     .and_then(|r| r.get(7))
                     .and_then(|v| v.parse::<u32>().ok())
                 {
-                    self.palette = true;
-                    self.command = format!("probe syscalls pid={pid} seconds=10 stack");
-                } else {
-                    self.status = "Select a syscall with an observed caller TID".into();
+                    Some(tid) => self.profile_thread(tid),
+                    None => self.status = "Select a syscall with an observed caller TID".into(),
                 }
             }
             KeyCode::Char('U') if self.tab == 3 => self.memory_gib = !self.memory_gib,
@@ -1496,7 +1508,7 @@ impl App {
                 if let Some(pid) = self.selected_task().map(|x| x.pid) {
                     self.drill(5);
                     self.palette = true;
-                    self.command = format!("probe syscalls pid={pid} seconds=10");
+                    self.command = format!("probe syscalls pid={pid} seconds=30 stack");
                     self.status =
                         "Review selected thread capture; Enter starts a bounded trace".into();
                 }
@@ -1600,7 +1612,7 @@ impl App {
                     self.execute("probe syscalls seconds=30");
                 }
             }
-            KeyCode::Char('x') if self.tab == 5 => self.execute("stop-probe"),
+            KeyCode::Char('x') if self.tab == 5 || self.tab == 13 => self.execute("stop-probe"),
             KeyCode::Char('l') if self.tab == 1 || self.tab == 12 => {
                 if let Some(task) = self.selected_task() {
                     let pid = task.pid;
@@ -1652,23 +1664,183 @@ impl App {
         self.flame_choosing
             || (self.flame_target.is_none() && self.snapshot.telemetry.profile.is_empty())
     }
-    /// Request stacks for the selected thread and show the profile it fills.
+    /// Profile one thread by id, whatever view named it.
+    pub fn profile_thread(&mut self, tid: u32) {
+        let subject = self
+            .flame_subjects_all()
+            .into_iter()
+            .find(|s| s.tid == tid)
+            .or_else(|| {
+                self.snapshot
+                    .telemetry
+                    .tasks
+                    .iter()
+                    .find(|x| x.pid == tid)
+                    .map(|task| FlameSubject {
+                        name: task.name.clone(),
+                        tgid: task.tgid,
+                        tid,
+                        threads: 1,
+                        cpu_pct: task.cpu_pct.unwrap_or(0.),
+                        rss_bytes: task.rss_bytes,
+                        cgroup: task.cgroup.clone(),
+                        busiest: task.name.clone(),
+                    })
+            });
+        match subject {
+            Some(subject) => self.start_profile(subject),
+            None => self.status = format!("TID {tid} is no longer running"),
+        }
+    }
+    /// Request stacks for the selected subject and show the profile it fills.
     pub fn profile_selected_task(&mut self) {
         if self.snapshot.demo || self.replay.is_some() {
             self.status = "Stack capture requires live mode; this profile is fixture data".into();
             return;
         }
-        let Some(task) = self.selected_task().cloned() else {
-            self.status = "Select a thread to profile it, then press P".into();
+        // On the Flame view the selection is a subject from its own list; on
+        // Tasks and Dense it is the selected row.
+        let subject = if self.tab == 13 {
+            self.flame_subjects().get(self.selected).cloned()
+        } else {
+            self.selected_task().map(|task| FlameSubject {
+                name: task.name.clone(),
+                tgid: task.tgid,
+                tid: task.pid,
+                threads: 1,
+                cpu_pct: task.cpu_pct.unwrap_or(0.),
+                rss_bytes: task.rss_bytes,
+                cgroup: task.cgroup.clone(),
+                busiest: task.name.clone(),
+            })
+        };
+        let Some(subject) = subject else {
+            self.status = "Select something to profile, then press P".into();
             return;
         };
-        let (pid, name) = (task.pid, task.name.clone());
-        self.probe_request = Some(format!("syscalls pid={pid} seconds=30 stack"));
+        self.start_profile(subject);
+    }
+    /// Begin a bounded stack capture for one subject and show it filling.
+    fn start_profile(&mut self, subject: FlameSubject) {
+        if self.snapshot.demo || self.replay.is_some() {
+            self.status = "Stack capture requires live mode; this profile is fixture data".into();
+            return;
+        }
+        let tid = subject.tid;
+        self.probe_request = Some(format!("syscalls pid={tid} seconds=30 stack"));
+        let name = subject.name.clone();
         self.switch(13);
-        self.flame_target = Some(task);
+        self.flame_target = Some(subject.clone());
         self.flame_choosing = false;
-        self.status =
-            format!("Profiling {name} TID {pid} for 30s; stacks appear as syscalls are made");
+        // Say which thread, because the probe attaches to one and a process
+        // with many threads will not be captured whole.
+        self.status = if subject.threads > 1 {
+            format!(
+                "Profiling {name} thread {} (TID {tid}) for 30s, the busiest of {}",
+                subject.busiest, subject.threads
+            )
+        } else {
+            format!("Profiling {name} TID {tid} for 30s; stacks appear as syscalls are made")
+        };
+    }
+    /// Subjects the Flame view offers to profile.
+    ///
+    /// Stacks are walked in user space, so a kernel thread can never yield
+    /// one and is not offered. Mode 0 lists processes, which is how people
+    /// name what they want to profile; mode 1 lists every thread, for when a
+    /// specific one matters. Each entry carries the thread a capture would
+    /// actually attach to, because the probe filters on a thread id.
+    pub fn flame_subjects(&self) -> Vec<FlameSubject> {
+        let query = self.filter.to_lowercase();
+        let tasks: Vec<&crate::domain::Task> = self
+            .snapshot
+            .telemetry
+            .tasks
+            .iter()
+            .filter(|x| !x.kernel_thread)
+            .filter(|x| {
+                query.is_empty()
+                    || x.name.to_lowercase().contains(&query)
+                    || x.pid.to_string().contains(&query)
+            })
+            .collect();
+        let mut subjects: Vec<FlameSubject> = if self.mode == 1 {
+            tasks
+                .iter()
+                .map(|x| FlameSubject {
+                    name: x.name.clone(),
+                    tgid: x.tgid,
+                    tid: x.pid,
+                    threads: 1,
+                    cpu_pct: x.cpu_pct.unwrap_or(0.),
+                    rss_bytes: x.rss_bytes,
+                    cgroup: x.cgroup.clone(),
+                    busiest: x.name.clone(),
+                })
+                .collect()
+        } else {
+            let mut by_process: std::collections::BTreeMap<u32, FlameSubject> =
+                std::collections::BTreeMap::new();
+            for task in &tasks {
+                let entry = by_process.entry(task.tgid).or_insert_with(|| FlameSubject {
+                    name: task.name.clone(),
+                    tgid: task.tgid,
+                    tid: task.pid,
+                    threads: 0,
+                    cpu_pct: 0.,
+                    rss_bytes: 0,
+                    cgroup: task.cgroup.clone(),
+                    busiest: task.name.clone(),
+                });
+                entry.threads += 1;
+                entry.cpu_pct += task.cpu_pct.unwrap_or(0.);
+                // The process is named by its main thread, and a capture
+                // attaches to whichever thread is doing the most work.
+                if task.pid == task.tgid {
+                    entry.name = task.name.clone();
+                    entry.rss_bytes = task.rss_bytes;
+                }
+                if task.cpu_pct.unwrap_or(0.) > self.thread_cpu(entry.tid) {
+                    entry.tid = task.pid;
+                    entry.busiest = task.name.clone();
+                }
+            }
+            by_process.into_values().collect()
+        };
+        subjects.sort_by(|a, b| {
+            b.cpu_pct
+                .total_cmp(&a.cpu_pct)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        subjects
+    }
+    /// Every thread as a subject, regardless of the picker's current mode.
+    fn flame_subjects_all(&self) -> Vec<FlameSubject> {
+        self.snapshot
+            .telemetry
+            .tasks
+            .iter()
+            .filter(|x| !x.kernel_thread)
+            .map(|x| FlameSubject {
+                name: x.name.clone(),
+                tgid: x.tgid,
+                tid: x.pid,
+                threads: 1,
+                cpu_pct: x.cpu_pct.unwrap_or(0.),
+                rss_bytes: x.rss_bytes,
+                cgroup: x.cgroup.clone(),
+                busiest: x.name.clone(),
+            })
+            .collect()
+    }
+    fn thread_cpu(&self, tid: u32) -> f64 {
+        self.snapshot
+            .telemetry
+            .tasks
+            .iter()
+            .find(|x| x.pid == tid)
+            .and_then(|x| x.cpu_pct)
+            .unwrap_or(0.)
     }
     /// The zoomed frame's children: what selection moves between.
     pub fn flame_children(&self) -> usize {
@@ -1698,10 +1870,10 @@ impl App {
     }
     fn row_count(&self) -> usize {
         if self.tab == 13 {
-            // Choosing a thread is what the empty view offers, so selection
-            // moves between threads until there is a profile to move within.
+            // Choosing a subject is what the empty view offers, so selection
+            // moves between subjects until there is a profile to move within.
             return if self.flame_picking() {
-                self.visible_tasks().len()
+                self.flame_subjects().len()
             } else {
                 self.flame_children()
             };

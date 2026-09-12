@@ -411,13 +411,24 @@ fn syscall_latency_and_stack_controls_use_observed_caller() {
         .iter()
         .all(|r| r[5].trim_end_matches("ms").parse::<f64>().unwrap() > 1.));
     let caller = a.rows()[0][7].clone();
+    // Profiling is one action wherever it is started from: u takes its subject
+    // from the syscall's observed caller rather than from a task list, and
+    // otherwise behaves exactly as P does.
+    a.snapshot.demo = false;
     key(&mut a, KeyCode::Char('u'));
-    assert!(a.palette);
-    assert_eq!(
-        a.command,
-        format!("probe syscalls pid={caller} seconds=10 stack")
+    assert!(
+        !a.palette,
+        "the capture starts rather than staging a command"
     );
-    assert!(a.probe_request.is_none());
+    assert_eq!(
+        a.probe_request.as_deref(),
+        Some(format!("syscalls pid={caller} seconds=30 stack").as_str())
+    );
+    assert_eq!(a.tab, 13, "and shows the profile it is filling");
+    assert_eq!(
+        a.flame_target.map(|s| s.tid.to_string()),
+        Some(caller.clone())
+    );
 }
 
 #[test]

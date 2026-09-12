@@ -382,6 +382,20 @@ impl Probes {
     }
     pub fn apply(&self, t: &mut Telemetry) {
         self.correlator.apply(t);
+        // How far through the bounded capture we are, so a view can show a
+        // countdown instead of leaving a quiet capture indistinguishable from
+        // a broken one.
+        t.details.insert(
+            "probe.progress".into(),
+            vec![
+                (
+                    "elapsed seconds".into(),
+                    self.started.elapsed().as_secs().to_string(),
+                ),
+                ("duration seconds".into(), self.duration_seconds.to_string()),
+                ("target tid".into(), self.target_pid.to_string()),
+            ],
+        );
         if !self.profile.is_empty() {
             let mut profile = self.profile.clone();
             profile.sort();

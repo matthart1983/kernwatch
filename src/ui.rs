@@ -77,7 +77,7 @@ pub fn draw(f: &mut Frame, a: &App) {
             2 => "g scope · M metric · h histogram · z scale",
             3 => "g memory view · U units · ↵ cache/process",
             4 => "↵ queue IRQ · i IRQs",
-            5 => "E errors · g latency · u stack · ↵ arguments",
+            5 => "E errors · g latency · P profile stacks · ↵ arguments",
             6 => "↵ effective CPU · a affinity",
             7 => "Space fold · p PSI · u unit · Q quota",
             8 => "B baseline · x mark · ↵ inspector",
@@ -85,7 +85,7 @@ pub fn draw(f: &mut Frame, a: &App) {
             10 => "t source/time · c diagnosis · ↵ record",
             11 => "Tab evidence/action · ↵ inspect/preview · v verify",
             12 => "l task latency · P profile stacks · ↵ drill · [ ] views",
-            13 => "↵ zoom · Esc widen · P profile a thread · e export",
+            13 => "↵ zoom · Esc widen · P subject · x stop · g process/thread",
             _ => "↵ drill · [ ] views",
         }
     };

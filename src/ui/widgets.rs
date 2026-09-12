@@ -933,7 +933,13 @@ fn readable_on(background: Color) -> Color {
 /// Draw a laid-out icicle. Every cell is exactly as wide as its share of the
 /// samples; nothing is widened to fit a label, so a frame whose name does not
 /// fit is shortened rather than given room it did not earn.
-pub fn icicle(f: &mut Frame, area: Rect, cells: &[crate::flame::Placed], selected: usize) {
+pub fn icicle(
+    f: &mut Frame,
+    area: Rect,
+    cells: &[crate::flame::Placed],
+    selected: usize,
+    matching: &str,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -948,10 +954,13 @@ pub fn icicle(f: &mut Frame, area: Rect, cells: &[crate::flame::Placed], selecte
             continue;
         }
         let chosen = index == selected;
-        let tint = frame_tint(&cell.name);
+        // A searched-for frame is marked wherever it appears, which is the
+        // question a profile is usually asked: where does this get called.
+        let hit = !matching.is_empty() && cell.name.to_lowercase().contains(matching);
+        let tint = if hit { GOLD } else { frame_tint(&cell.name) };
         // Labels sit on the tint, so it stays dark enough to read light text
         // on, and selection brightens the same hue rather than recoloring it.
-        let background = if chosen {
+        let background = if chosen || hit {
             lerp(BG, tint, 0.55)
         } else {
             lerp(BG, tint, 0.18 + 0.05 * (cell.depth % 4) as f64)

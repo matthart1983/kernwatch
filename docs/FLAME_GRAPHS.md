@@ -1,6 +1,12 @@
 # Flame graphs
 
-Stack profiles, folded and drawn as a zoomable icicle on the Flame view (`F`).
+Syscall-entry stack profiles, folded and drawn as a zoomable icicle on the
+Flame view (`F`).
+
+Stacks are taken when a thread enters a syscall, so this answers "what calls
+into the kernel, and from where". It is **not** a CPU profile: a thread burning
+CPU without making syscalls produces nothing, and one blocked in a single
+`epoll_wait` produces one tall tower. The view says so on screen.
 
 ## What is implemented
 
@@ -75,19 +81,38 @@ Also open: **kernel stacks** (the `stack_id` flags are hardcoded to
 
 ## Collecting a profile
 
-Stacks come from a capture that records them:
+`P` profiles the selected subject, from wherever it is selected: the Flame
+view's own list, Tasks, Dense, or a syscall row on Syscalls (`u`, which takes
+the observed caller as its subject). There is one action, one duration, and no
+staged command to confirm. `: probe syscalls pid=TID seconds=N stack` remains
+for the unusual case.
 
-```
-: probe syscalls pid=TID seconds=30 stack
-```
+With nothing captured, the Flame view lists what it could profile: processes by
+default, ranked by CPU, `g` to list every thread instead. Kernel threads are not
+offered — their stacks are not in user space, so a capture on one can only come
+back empty.
 
-The capture is bounded and scoped to one thread; `probes.rs` refuses `stack`
-without `pid=TID`. Opening the view collects nothing on its own.
+### What one capture actually covers
+
+The probe filters on a **thread** id (`bpf_get_stackid` is attached to
+`raw_tp/sys_enter`, and the filter compares `bpf_get_current_pid_tgid()`'s low
+word). Selecting a process therefore captures its busiest thread, and the panel
+says which thread and how many others were left out. To capture a different one,
+switch the picker to threads with `g`.
+
+Capturing a whole process would need the filter to compare the TGID instead,
+which means rebuilding `probes/kernwatch.bpf.o` with a BPF-capable Clang.
 
 ## Reading the view
 
 - `↑` `↓` select among the zoomed frame's children. Selection walks the tree,
   not the drawn cells, so it does not change with terminal width.
 - `Enter` zooms into the selected frame; `Esc` widens one level, then leaves.
-- The subtitle reports samples, the truncated share, and how many samples carry
-  an unresolved address.
+- `/` searches; every frame whose name matches is marked wherever it appears,
+  and the subtitle counts the matches and the stacks passing through them.
+- `P` chooses another subject; `x` stops a running capture and keeps what it
+  collected.
+- While a capture runs the subtitle counts it down (`18s of 30s`), so a quiet
+  capture is distinguishable from a broken one.
+- The subtitle reports stacks, the truncated share, and how many carry an
+  unresolved address.

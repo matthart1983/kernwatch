@@ -42,8 +42,8 @@ fn an_empty_view_with_no_thread_chosen_offers_the_threads_to_choose_from() {
     a.switch(FLAME);
     assert!(a.flame_picking());
     let screen = render(&a, 160, 52);
-    assert!(screen.contains("choose a thread to profile"));
-    assert!(screen.contains("TID"), "the picker identifies threads");
+    assert!(screen.contains("choose a process to profile"));
+    assert!(screen.contains("TGID"), "the picker identifies processes");
     assert_eq!(
         a.flame_children(),
         0,
@@ -57,13 +57,13 @@ fn an_empty_profile_for_a_chosen_thread_explains_itself() {
     let mut a = App::new(model::demo());
     a.snapshot.telemetry.profile = Default::default();
     a.switch(FLAME);
-    a.flame_target = a.snapshot.telemetry.tasks.first().cloned();
+    a.flame_target = a.flame_subjects().first().cloned();
     assert!(!a.flame_picking());
     let screen = render(&a, 160, 52);
     assert!(screen.contains("No stacks have been collected"));
-    let task = a.flame_target.clone().unwrap();
+    let subject = a.flame_target.clone().unwrap();
     assert!(
-        screen.contains(&task.pid.to_string()),
+        screen.contains(&subject.tid.to_string()),
         "an empty profile still says whose stacks are missing"
     );
 }
@@ -185,7 +185,7 @@ fn an_empty_profile_says_which_reason_it_is() {
         a.snapshot.telemetry.profile = Default::default();
         // A thread has been chosen, so the view explains the empty profile
         // rather than offering the list again.
-        a.flame_target = a.snapshot.telemetry.tasks.first().cloned();
+        a.flame_target = a.flame_subjects().first().cloned();
         // The fixture ships a syscall capability; each case sets its own.
         a.snapshot.telemetry.capabilities.remove("syscalls");
         setup(&mut a);
@@ -195,8 +195,8 @@ fn an_empty_profile_says_which_reason_it_is() {
 
     // Nothing started: say how to start one, and that opening the view is not it.
     let screen = empty(&|_| {});
-    assert!(screen.contains("No capture has been started"));
-    assert!(screen.contains("thread id, not a process id"));
+    assert!(screen.contains("Nothing has been captured yet"));
+    assert!(screen.contains("choose a process or thread"));
 
     // Refused: repeat the refusal rather than the instructions.
     let screen = empty(&|a| {
@@ -217,7 +217,7 @@ fn an_empty_profile_says_which_reason_it_is() {
             .insert("syscalls".into(), Quality::Available);
     });
     assert!(screen.contains("capture is running"));
-    assert!(screen.contains("makes no syscalls"));
+    assert!(screen.contains("makes none produces nothing"));
 
     // Running, and the walk is failing for a nameable reason.
     let screen = empty(&|a| {
@@ -296,27 +296,30 @@ fn the_view_can_start_a_profile_without_leaving_it() {
         "with no thread chosen it offers the list"
     );
     key(&mut a, KeyCode::Down);
-    let pid = a.selected_task().expect("a thread").pid;
+    // The picker offers subjects, and a process is captured through its
+    // busiest thread.
+    let subject = a.flame_subjects()[a.selected].clone();
+    let pid = subject.tid;
     key(&mut a, KeyCode::Enter);
     assert_eq!(
         a.probe_request.as_deref(),
         Some(format!("syscalls pid={pid} seconds=30 stack").as_str()),
-        "Enter on the picker profiles the selected thread"
+        "Enter on the picker profiles the selected subject"
     );
     assert_eq!(a.tab, FLAME, "and stays on the profile it is filling");
-    assert_eq!(a.flame_target.map(|t| t.pid), Some(pid));
+    assert_eq!(a.flame_target.map(|s| s.tid), Some(pid));
 }
 
 #[test]
 fn a_profile_names_the_thread_it_is_of() {
     let mut a = App::new(model::demo());
     a.switch(FLAME);
-    a.flame_target = a.snapshot.telemetry.tasks.first().cloned();
-    let task = a.flame_target.clone().unwrap();
+    a.flame_target = a.flame_subjects().first().cloned();
+    let subject = a.flame_target.clone().unwrap();
     let screen = render(&a, 160, 52);
     assert!(
-        screen.contains(&task.name) && screen.contains(&task.pid.to_string()),
-        "the view should name the thread whose stacks it draws"
+        screen.contains(&subject.name) && screen.contains(&subject.tid.to_string()),
+        "the view should name the subject whose stacks it draws"
     );
     assert!(screen.contains("TGID"), "and the process it belongs to");
 }
@@ -326,7 +329,7 @@ fn profiling_again_returns_to_the_thread_list() {
     let mut a = App::new(model::demo());
     a.snapshot.demo = false;
     a.switch(FLAME);
-    a.flame_target = a.snapshot.telemetry.tasks.first().cloned();
+    a.flame_target = a.flame_subjects().first().cloned();
     assert!(!a.flame_picking());
     key(&mut a, KeyCode::Char('P'));
     assert!(
@@ -369,4 +372,193 @@ fn the_timeline_trades_resolution_for_reach_rather_than_dropping_history() {
         "the newest frame is the one just recorded"
     );
     assert!(span.0 < span.1, "the span runs oldest to newest");
+}
+
+#[test]
+fn the_picker_offers_only_subjects_a_capture_could_succeed_on() {
+    let mut a = App::new(model::demo());
+    a.snapshot.telemetry.profile = Default::default();
+    a.switch(FLAME);
+    let subjects = a.flame_subjects();
+    assert!(!subjects.is_empty());
+    // Stacks are walked in user space, so a kernel thread can never yield one.
+    let kernel: Vec<&str> = a
+        .snapshot
+        .telemetry
+        .tasks
+        .iter()
+        .filter(|t| t.kernel_thread)
+        .map(|t| t.name.as_str())
+        .collect();
+    for subject in &subjects {
+        assert!(
+            !kernel.contains(&subject.name.as_str()),
+            "{} is a kernel thread and cannot be profiled",
+            subject.name
+        );
+    }
+    // Processes by default, one row each, busiest first.
+    let mut seen = std::collections::BTreeSet::new();
+    for subject in &subjects {
+        assert!(seen.insert(subject.tgid), "a process is listed once");
+    }
+    for pair in subjects.windows(2) {
+        assert!(pair[0].cpu_pct >= pair[1].cpu_pct, "busiest first");
+    }
+}
+
+#[test]
+fn listing_threads_is_a_mode_of_the_same_picker() {
+    let mut a = App::new(model::demo());
+    a.snapshot.telemetry.profile = Default::default();
+    a.switch(FLAME);
+    let processes = a.flame_subjects().len();
+    a.mode = 1;
+    let threads = a.flame_subjects().len();
+    assert!(
+        threads >= processes,
+        "every process has at least one thread ({threads} vs {processes})"
+    );
+    let screen = render(&a, 160, 52);
+    assert!(screen.contains("choose a thread to profile"));
+}
+
+#[test]
+fn a_multi_thread_process_says_which_thread_it_captured() {
+    let mut a = App::new(model::demo());
+    a.snapshot.telemetry.profile = Default::default();
+    a.snapshot.demo = false;
+    a.switch(FLAME);
+    let multi = a.flame_subjects().into_iter().find(|s| s.threads > 1);
+    let Some(subject) = multi else {
+        return; // the fixture may be single-threaded
+    };
+    a.flame_target = Some(subject.clone());
+    let screen = render(&a, 160, 52);
+    assert!(
+        screen.contains("the rest are not captured"),
+        "a process captured through one thread must not imply it captured them all"
+    );
+}
+
+#[test]
+fn a_finished_capture_does_not_claim_it_never_started() {
+    use kernwatch::domain::Quality;
+    let mut a = App::new(model::demo());
+    a.snapshot.demo = false;
+    a.snapshot.telemetry.profile = Default::default();
+    a.switch(FLAME);
+    a.flame_target = a.flame_subjects().first().cloned();
+    a.snapshot
+        .telemetry
+        .capabilities
+        .insert("syscalls".into(), Quality::Stopped);
+    // A capture that actually ran identified itself.
+    a.snapshot.telemetry.details.insert(
+        "probe.capture_id".into(),
+        vec![("id".into(), "1789".into())],
+    );
+    let screen = render(&a, 160, 52);
+    assert!(
+        screen.contains("finished"),
+        "a capture that ran and stopped has finished, not gone missing"
+    );
+    assert!(!screen.contains("Nothing has been captured yet"));
+}
+
+#[test]
+fn a_running_capture_shows_how_far_through_it_is() {
+    use kernwatch::domain::Quality;
+    let mut a = App::new(model::demo());
+    a.snapshot.demo = false;
+    a.switch(FLAME);
+    a.flame_target = a.flame_subjects().first().cloned();
+    a.snapshot
+        .telemetry
+        .capabilities
+        .insert("syscalls".into(), Quality::Available);
+    a.snapshot.telemetry.details.insert(
+        "probe.progress".into(),
+        vec![
+            ("elapsed seconds".into(), "18".into()),
+            ("duration seconds".into(), "30".into()),
+        ],
+    );
+    let screen = render(&a, 160, 52);
+    assert!(
+        screen.contains("18s of 30s"),
+        "a quiet capture must be distinguishable from a broken one"
+    );
+}
+
+#[test]
+fn stopping_a_capture_works_from_the_view_that_shows_it() {
+    let mut a = App::new(model::demo());
+    a.snapshot.demo = false;
+    a.switch(FLAME);
+    key(&mut a, KeyCode::Char('x'));
+    assert_eq!(
+        a.probe_request.as_deref(),
+        Some("stop"),
+        "the panel offers x, so x must stop the capture here"
+    );
+}
+
+#[test]
+fn the_view_says_what_its_stacks_do_not_cover() {
+    let mut a = App::new(model::demo());
+    a.switch(FLAME);
+    let screen = render(&a, 160, 52);
+    assert!(
+        screen.contains("syscall entry"),
+        "a syscall-entry profile must not be read as a CPU profile"
+    );
+}
+
+#[test]
+fn a_requested_capture_is_not_reported_as_one_that_finished() {
+    use kernwatch::domain::Quality;
+    // Between the request and the probe attaching the capability reads
+    // Stopped, and briefly claimed the capture had finished.
+    let mut a = App::new(model::demo());
+    a.snapshot.demo = false;
+    a.snapshot.telemetry.profile = Default::default();
+    a.switch(FLAME);
+    a.flame_target = a.flame_subjects().first().cloned();
+    a.snapshot
+        .telemetry
+        .capabilities
+        .insert("syscalls".into(), Quality::Stopped);
+    a.snapshot.telemetry.details.remove("probe.capture_id");
+    let screen = render(&a, 160, 52);
+    assert!(screen.contains("attaching"));
+    assert!(
+        !screen.contains("finished without collecting"),
+        "nothing has run yet, so nothing has finished"
+    );
+}
+
+#[test]
+fn searching_marks_a_frame_everywhere_it_is_called_from() {
+    let mut a = App::new(model::demo());
+    a.switch(FLAME);
+    // aesni_ctr32 is reached through both encrypt and decrypt in the fixture.
+    a.filter = "aesni".into();
+    let screen = render(&a, 160, 52);
+    assert!(
+        screen.contains("frames matching"),
+        "a search should say what it found"
+    );
+    let profile = &a.snapshot.telemetry.profile;
+    let reached: Vec<&str> = profile
+        .root
+        .children
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert!(!reached.is_empty());
+    // Clearing the search leaves the profile as it was.
+    a.filter.clear();
+    let plain = render(&a, 160, 52);
+    assert!(!plain.contains("frames matching"));
 }

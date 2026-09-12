@@ -1068,7 +1068,7 @@ fn tasks(f: &mut Frame, r: Rect, a: &App) {
         actions,
         &[
             "↵ scheduler on selected CPU    i IRQ affinity    a affinity dry-run",
-            "c cgroup · t syscall capture · P profile stacks · y copy identity · w watch",
+            "c cgroup · P profile stacks · y copy identity · w watch",
         ],
     );
 }
@@ -1776,7 +1776,7 @@ fn syscalls(f: &mut Frame, r: Rect, a: &App) {
     controls(
         f,
         bands[0],
-        "l capture 30s · x stop · :probe syscalls pid=TID · g all / errors / >1ms · E errors · u stack",
+        "l capture 30s · x stop · P profile stacks · g all / errors / >1ms · E errors",
         a,
     );
     capture_status(
@@ -3367,7 +3367,7 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
         f,
         bands[0],
         format!(
-            " ↵ zoom frame · Esc widen · ↑↓ select · P profile another thread{}",
+            " ↵ zoom · Esc widen · ↑↓ select · / find frame · P new subject · x stop{}",
             if a.snapshot.demo {
                 " · demo fixture"
             } else {
@@ -3378,14 +3378,31 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
     );
     let (root, zoom) = flame_root(a);
     let subtitle = if profile.is_empty() {
-        "no stacks collected".to_string()
+        match flame_progress(a) {
+            Some((elapsed, total)) if matches!(capture_state(a), Capture::Running) => {
+                format!("capturing · {elapsed}s of {total}s")
+            }
+            _ => "no stacks collected".to_string(),
+        }
     } else {
-        let mut parts = vec![format!("{} samples", root.samples)];
+        let mut parts = Vec::new();
+        if let (Capture::Running, Some((elapsed, total))) = (capture_state(a), flame_progress(a)) {
+            parts.push(format!("{elapsed}s of {total}s"));
+        }
+        parts.push(format!("{} stacks", root.samples));
         if let Some(share) = profile.shallow_share().filter(|s| *s > 0.) {
             parts.push(format!("{share:.0}% truncated"));
         }
         if profile.unresolved > 0 {
             parts.push(format!("{} unresolved", profile.unresolved));
+        }
+        if !a.filter.is_empty() {
+            let needle = a.filter.to_lowercase();
+            let (frames, samples) = matching_frames(root, &needle);
+            parts.push(format!(
+                "{frames} frames matching {:?} · {samples} stacks",
+                a.filter
+            ));
         }
         parts.join(" · ")
     };
@@ -3415,16 +3432,9 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
             flame_empty_lines(a).into_iter().map(Line::raw).collect(),
         );
     } else {
-        icicle(f, area, &cells.cells, selected);
+        icicle(f, area, &cells.cells, selected, &a.filter.to_lowercase());
     }
-    let detail = p(
-        f,
-        bands[2],
-        a,
-        2,
-        "subject / frame",
-        "what is being profiled",
-    );
+    let detail = p(f, bands[2], a, 2, "subject / frame", "syscall-entry stacks");
     let mut fields = flame_subject_fields(a);
     if let Some(node) = root.children.get(a.selected) {
         let share = node.samples as f64 / root.samples.max(1) as f64 * 100.;
@@ -3458,63 +3468,111 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
     fields_widget(f, detail, &fields, 0);
 }
 
-/// What the profile is of, named the way the capture named it.
+/// What the profile is of.
 fn flame_subject(a: &App) -> String {
     match &a.flame_target {
-        Some(task) => format!("{} · TID {}", task.name, task.pid),
+        Some(s) if s.threads > 1 => format!("{} · TID {} of {}", s.name, s.tid, s.threads),
+        Some(s) => format!("{} · TID {}", s.name, s.tid),
         None if !t(a).profile.source.is_empty() => t(a).profile.source.clone(),
         None => "stacks".into(),
     }
 }
 
-/// The thread being profiled, as detail rows.
+/// Elapsed and total seconds of the capture in progress, if one is running.
+fn flame_progress(a: &App) -> Option<(u64, u64)> {
+    let fields = t(a).details.get("probe.progress")?;
+    let read = |name: &str| {
+        fields
+            .iter()
+            .find(|(key, _)| key == name)
+            .and_then(|(_, v)| v.parse::<u64>().ok())
+    };
+    Some((read("elapsed seconds")?, read("duration seconds")?))
+}
+
+/// Whether a capture is running, finished, or never started.
+enum Capture {
+    Starting,
+    Running,
+    Finished,
+    Refused(String),
+    None,
+}
+fn capture_state(a: &App) -> Capture {
+    match t(a).capabilities.get("syscalls") {
+        Some(crate::domain::Quality::Available) => Capture::Running,
+        Some(
+            crate::domain::Quality::Denied(why)
+            | crate::domain::Quality::Error(why)
+            | crate::domain::Quality::Unsupported(why),
+        ) => Capture::Refused(why.clone()),
+        // A capture that ran and stopped leaves its capability Stopped. Without
+        // this it read as one that never started. Between the request and the
+        // probe attaching the capability is also Stopped, and no capture has
+        // identified itself yet: that is starting, not finished.
+        Some(crate::domain::Quality::Stopped) if a.flame_target.is_some() => {
+            if t(a).details.contains_key("probe.capture_id") {
+                Capture::Finished
+            } else {
+                Capture::Starting
+            }
+        }
+        _ => Capture::None,
+    }
+}
+
+/// The subject being profiled, as detail rows.
 fn flame_subject_fields(a: &App) -> Vec<(String, String)> {
     let mut fields = Vec::new();
-    match &a.flame_target {
-        Some(task) => {
-            fields.push(("thread".into(), format!("{} · TID {}", task.name, task.pid)));
-            fields.push((
-                "process".into(),
-                format!("TGID {} · parent {}", task.tgid, task.parent_pid),
-            ));
-            fields.push((
-                "state / CPU".into(),
+    if let Some(s) = &a.flame_target {
+        fields.push(("process".into(), format!("{} · TGID {}", s.name, s.tgid)));
+        // The probe filters on a thread id, so a process with many threads is
+        // not captured whole. Saying so beats letting the graph imply it.
+        fields.push((
+            "captured thread".into(),
+            if s.threads > 1 {
                 format!(
-                    "{} · CPU{} · {}",
-                    task.state,
-                    task.cpu,
-                    task.cpu_pct
-                        .map(|v| format!("{v:.1}%"))
-                        .unwrap_or("—".into())
-                ),
-            ));
-            if !task.cgroup.is_empty() {
-                fields.push(("cgroup".into(), task.cgroup.clone()));
-            }
-            fields.push((
-                "memory".into(),
-                format!("{:.0} MiB RSS", task.rss_bytes as f64 / 1048576.),
-            ));
-            fields.push((
-                "capture".into(),
-                match t(a).capabilities.get("syscalls") {
-                    Some(crate::domain::Quality::Available) => {
-                        "syscall stacks, 30s bounded · x stops it".into()
-                    }
-                    Some(
-                        crate::domain::Quality::Denied(why)
-                        | crate::domain::Quality::Error(why)
-                        | crate::domain::Quality::Unsupported(why),
-                    ) => format!("did not run · {why}"),
-                    _ => "requested".into(),
-                },
-            ));
+                    "{} · TID {} — the busiest of {} threads; the rest are not captured",
+                    s.busiest, s.tid, s.threads
+                )
+            } else {
+                format!("{} · TID {}", s.busiest, s.tid)
+            },
+        ));
+        fields.push((
+            "cpu / memory".into(),
+            format!(
+                "{:.1}% · {:.0} MiB RSS",
+                s.cpu_pct,
+                s.rss_bytes as f64 / 1048576.
+            ),
+        ));
+        if !s.cgroup.is_empty() {
+            fields.push(("cgroup".into(), s.cgroup.clone()));
         }
-        None if !t(a).profile.source.is_empty() => {
-            fields.push(("source".into(), t(a).profile.source.clone()));
-        }
-        None => {}
+    } else if !t(a).profile.source.is_empty() {
+        fields.push(("source".into(), t(a).profile.source.clone()));
     }
+    fields.push((
+        "capture".into(),
+        match capture_state(a) {
+            Capture::Starting => "requested · waiting for the probe to attach".into(),
+            Capture::Running => match flame_progress(a) {
+                Some((elapsed, total)) => format!(
+                    "running · {elapsed}s of {total}s · x stops it and keeps what was collected"
+                ),
+                None => "running · x stops it".into(),
+            },
+            Capture::Finished => "finished · the profile below is what it collected".into(),
+            Capture::Refused(why) => format!("did not run · {why}"),
+            Capture::None => "none started · P chooses a subject".into(),
+        },
+    ));
+    fields.push((
+        "scope".into(),
+        "stacks are taken at syscall entry; time spent on CPU between syscalls is not represented"
+            .into(),
+    ));
     let profile = &t(a).profile;
     if profile.shallow > 0 {
         fields.push((
@@ -3528,35 +3586,63 @@ fn flame_subject_fields(a: &App) -> Vec<(String, String)> {
     fields
 }
 
-/// A thread list, so a profile can be started from the view that shows it.
+/// The subjects a profile can be taken of, so one can be chosen here.
 fn flame_picker(f: &mut Frame, r: Rect, a: &App) {
     let bands = vertical(r, &[Constraint::Length(1), Constraint::Min(8)]);
+    let threads = a.mode == 1;
     line(
         f,
         bands[0],
-        " ↑↓ select thread · ↵ or P profile it for 30s · / filter".to_string(),
+        format!(
+            " ↑↓ select · ↵ or P profile it for 30s · g {} · / filter",
+            if threads {
+                "group by process"
+            } else {
+                "list every thread"
+            }
+        ),
         DIM,
     );
-    let tasks = a.visible_tasks();
+    let subjects = a.flame_subjects();
     let subtitle = if a.snapshot.demo {
         "demo fixture · capture requires live mode".to_string()
     } else {
-        format!("{} threads · stacks are captured per thread", tasks.len())
+        format!(
+            "{} {} · kernel threads are not listed: their stacks are not in user space",
+            subjects.len(),
+            if threads { "threads" } else { "processes" }
+        )
     };
-    let area = p(f, bands[1], a, 1, "choose a thread to profile", &subtitle);
-    let rows = tasks
+    let area = p(
+        f,
+        bands[1],
+        a,
+        1,
+        if threads {
+            "choose a thread to profile"
+        } else {
+            "choose a process to profile"
+        },
+        &subtitle,
+    );
+    let rows = subjects
         .iter()
-        .map(|task| {
+        .map(|s| {
             vec![
-                task.name.clone(),
-                task.pid.to_string(),
-                task.state.clone(),
-                task.cpu_pct
-                    .map(|v| format!("{v:.1}"))
-                    .unwrap_or("—".into()),
-                format!("{:.0}", task.rss_bytes as f64 / 1048576.),
-                task.cgroup.clone(),
-                task.verdict.clone(),
+                s.name.clone(),
+                if threads {
+                    s.tid.to_string()
+                } else {
+                    s.tgid.to_string()
+                },
+                if threads {
+                    "—".into()
+                } else {
+                    s.threads.to_string()
+                },
+                format!("{:.1}", s.cpu_pct),
+                format!("{:.0}", s.rss_bytes as f64 / 1048576.),
+                s.cgroup.clone(),
             ]
         })
         .collect::<Vec<_>>();
@@ -3564,26 +3650,36 @@ fn flame_picker(f: &mut Frame, r: Rect, a: &App) {
         f,
         area,
         &[
-            "thread", "TID", "state", "CPU %", "RSS MiB", "cgroup", "verdict",
+            if threads { "thread" } else { "process" },
+            if threads { "TID" } else { "TGID" },
+            "threads",
+            "CPU %",
+            "RSS MiB",
+            "cgroup",
         ],
         &rows,
-        &[22, 8, 8, 8, 9, 30, 16],
+        &[26, 9, 9, 9, 9, 34],
         a.selected,
     );
 }
 
 /// Why a profile is empty, in the terms the reader can act on.
 fn flame_empty_lines(a: &App) -> Vec<String> {
-    // An empty profile has several causes and they need different
-    // answers, so the panel reports which one it is rather than repeating
-    // the same sentence.
     let mut lines = vec!["No stacks have been collected.".to_string(), String::new()];
-    match t(a).capabilities.get("syscalls") {
-        Some(crate::domain::Quality::Available) => {
-            lines.push("A syscall capture is running.".into());
+    match capture_state(a) {
+        Capture::Starting => {
+            lines.push("The capture has been requested and the probe is attaching.".into());
+        }
+        Capture::Running => {
+            match flame_progress(a) {
+                Some((elapsed, total)) => {
+                    lines.push(format!("The capture is running: {elapsed}s of {total}s."))
+                }
+                None => lines.push("The capture is running.".into()),
+            }
             match t(a).details.get("probe.stacks") {
                 Some(tally) => {
-                    lines.push("Stacks seen by this capture:".into());
+                    lines.push("What it has seen so far:".into());
                     lines.extend(
                         tally
                             .iter()
@@ -3591,43 +3687,66 @@ fn flame_empty_lines(a: &App) -> Vec<String> {
                     );
                     lines.push(String::new());
                     lines.push(
-                        "`not requested` means the capture was started without `stack`.".into(),
-                    );
-                    lines.push(
-                        "`no frame pointer` means the traced binary cannot be walked; \
-                         rebuild it with -fno-omit-frame-pointer to profile it."
+                        "`no frame pointer` means the traced binary cannot be walked; rebuild \
+                         it with -fno-omit-frame-pointer to profile it."
                             .into(),
                     );
                 }
                 None => lines.push(
-                    "It has recorded no syscall yet. A thread that makes no syscalls \
-                     produces no stacks."
+                    "It has recorded no syscall yet. Stacks are taken at syscall entry, so a \
+                     thread that makes none produces nothing."
                         .into(),
                 ),
             }
         }
-        Some(
-            crate::domain::Quality::Denied(why)
-            | crate::domain::Quality::Error(why)
-            | crate::domain::Quality::Unsupported(why),
-        ) => {
-            lines.push("The last syscall capture did not run:".into());
+        Capture::Finished => {
+            lines.push("The capture finished without collecting a stack.".into());
+            lines.push(String::new());
+            match t(a).details.get("probe.stacks") {
+                Some(tally) => {
+                    lines.push("What it saw:".into());
+                    lines.extend(
+                        tally
+                            .iter()
+                            .map(|(reason, count)| format!("  {count} {reason}")),
+                    );
+                }
+                None => lines.push(
+                    "It recorded no syscall at all. Pick a busier thread, or one that does I/O."
+                        .into(),
+                ),
+            }
+            lines.push(String::new());
+            lines.push("P chooses another subject.".into());
+        }
+        Capture::Refused(why) => {
+            lines.push("The last capture did not run:".into());
             lines.push(format!("  {why}"));
             lines.push(String::new());
             lines.push("Stack capture needs BPF privileges; restart as root.".into());
         }
-        _ => {
-            lines.push("No capture has been started. To profile a thread:".into());
-            lines.push("  Tasks (2) · select a thread · P".into());
-            lines.push("  or : probe syscalls pid=TID seconds=30 stack".into());
+        Capture::None => {
+            lines.push("Nothing has been captured yet.".into());
+            lines.push("  P  choose a process or thread and profile it for 30s".into());
             lines.push(String::new());
-            lines.push(
-                "pid= takes a thread id, not a process id, and `stack` is refused \
-                 without it."
-                    .into(),
-            );
             lines.push("Opening this view collects nothing on its own.".into());
         }
     }
     lines
+}
+
+/// How many frames match a search, and how many stacks pass through them.
+fn matching_frames(node: &crate::flame::Node, needle: &str) -> (usize, u64) {
+    let mut frames = 0;
+    let mut samples = 0;
+    if node.name.to_lowercase().contains(needle) {
+        frames += 1;
+        samples += node.samples;
+    }
+    for child in &node.children {
+        let (f, s) = matching_frames(child, needle);
+        frames += f;
+        samples += s;
+    }
+    (frames, samples)
 }
