@@ -1,8 +1,11 @@
 """Build an isolated guest initramfs; no host mounts, devices, or settings changed."""
-import pathlib,subprocess,re,stat,gzip
+import pathlib,subprocess,re,stat,gzip,os
 root=pathlib.Path(__file__).resolve().parents[2]
 subprocess.run(['cc',str(root/'tests/vm/init.c'),'-O2','-o','/tmp/kernwatch-vm-init'],check=True)
-files={'init':pathlib.Path('/tmp/kernwatch-vm-init'),'probe_smoke':root/'target/release/examples/probe_smoke'}
+files={'init':pathlib.Path('/tmp/kernwatch-vm-init'),'probe_smoke':root/os.environ.get('KERNWATCH_GUEST_BINARY','target/release/examples/probe_smoke')}
+if os.environ.get('KERNWATCH_GUEST_PERF') == '1':
+ files['perf']=pathlib.Path('/usr/bin/perf')
+ files['sleep']=pathlib.Path('/usr/bin/sleep')
 for binary in list(files.values()):
  for lib in re.findall(r'(/[^\s()]+)',subprocess.check_output(['ldd',str(binary)],text=True)):
   p=pathlib.Path(lib)

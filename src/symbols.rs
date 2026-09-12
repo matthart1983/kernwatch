@@ -86,7 +86,12 @@ fn parse_maps(text: &str) -> Vec<Mapping> {
                 return None;
             }
             let offset = u64::from_str_radix(parts.next()?, 16).ok()?;
-            let path = parts.nth(2)?;
+            parts.next()?;
+            parts.next()?;
+            let path = parts.collect::<Vec<_>>().join(" ");
+            if path.ends_with(" (deleted)") {
+                return None;
+            }
             if !path.starts_with('/') {
                 return None;
             }
@@ -114,6 +119,7 @@ fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
 /// turn a mapped file offset back into the virtual address the symbols use.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Image {
+    fingerprint: u64,
     symbols: Vec<Symbol>,
     /// `(file offset, virtual address, length)` per PT_LOAD segment.
     loads: Vec<(u64, u64, u64)>,
@@ -136,7 +142,12 @@ fn parse_elf(bytes: &[u8]) -> Option<Image> {
     if bytes.get(..4)? != b"\x7fELF" || bytes.get(4)? != &2 || bytes.get(5)? != &1 {
         return None;
     }
-    let mut image = Image::default();
+    let mut image = Image {
+        fingerprint: bytes.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+            (hash ^ *byte as u64).wrapping_mul(0x100000001b3)
+        }),
+        ..Default::default()
+    };
     let phoff = u64_at(bytes, 0x20)? as usize;
     let phentsize = u16_at(bytes, 0x36)? as usize;
     let phnum = u16_at(bytes, 0x38)? as usize;
@@ -212,6 +223,8 @@ fn parse_elf(bytes: &[u8]) -> Option<Image> {
     Some(image)
 }
 
+type ImageVersion = (u64, u64, u64, i64, i64, i64, i64);
+
 /// Resolves addresses for as long as the processes behind them exist.
 #[derive(Default)]
 pub struct Symbols {
@@ -220,6 +233,8 @@ pub struct Symbols {
     pub kernel_restricted: bool,
     maps: BTreeMap<u32, Vec<Mapping>>,
     images: BTreeMap<String, Option<Image>>,
+    image_versions: BTreeMap<String, ImageVersion>,
+    checked_images: std::collections::BTreeSet<String>,
 }
 impl Symbols {
     /// Read kernel symbols from the host. Absent or restricted symbols leave
@@ -254,19 +269,97 @@ impl Symbols {
             .iter()
             .find(|m| address >= m.start && address < m.end)?
             .clone();
-        let image = self.images.entry(mapping.path.clone()).or_insert_with(|| {
-            std::fs::read(&mapping.path)
-                .ok()
-                .as_deref()
-                .and_then(parse_elf)
-        });
+        use std::os::unix::fs::MetadataExt;
+        let file = format!("/proc/{pid}/root{}", mapping.path);
+        if self.checked_images.insert(mapping.path.clone()) {
+            let stat = match std::fs::metadata(&file) {
+                Ok(stat) => stat,
+                Err(_) => {
+                    self.images.insert(mapping.path.clone(), None);
+                    return None;
+                }
+            };
+            let version = (
+                stat.dev(),
+                stat.ino(),
+                stat.len(),
+                stat.mtime(),
+                stat.mtime_nsec(),
+                stat.ctime(),
+                stat.ctime_nsec(),
+            );
+            if self.image_versions.get(&mapping.path) != Some(&version)
+                || self.images.get(&mapping.path).is_some_and(Option::is_none)
+            {
+                self.images.remove(&mapping.path);
+                self.image_versions.insert(mapping.path.clone(), version);
+            }
+        }
+        let image = self
+            .images
+            .entry(mapping.path.clone())
+            .or_insert_with(|| std::fs::read(&file).ok().as_deref().and_then(parse_elf));
         let image = image.as_ref()?;
         let vaddr = image.vaddr(address - mapping.start + mapping.offset)?;
-        lookup(&image.symbols, vaddr).map(|s| s.name.clone())
+        lookup(&image.symbols, vaddr)
+            .filter(|s| s.size > 0 || s.value == vaddr)
+            .map(|s| s.name.clone())
+    }
+    /// Stable image-relative identity, separate from presentation and ASLR.
+    pub fn identified(
+        &mut self,
+        pid: u32,
+        address: u64,
+        kernel: bool,
+    ) -> (String, crate::flame::FrameInfo) {
+        let raw = self.frame(pid, address, kernel);
+        let (image, offset) = if kernel {
+            ("kernel".to_owned(), address)
+        } else {
+            self.maps
+                .get(&pid)
+                .and_then(|maps| maps.iter().find(|m| address >= m.start && address < m.end))
+                .map(|m| {
+                    let offset = address - m.start + m.offset;
+                    let image = self.images.get(&m.path).and_then(|i| i.as_ref());
+                    let symbol = image
+                        .and_then(|i| i.vaddr(offset).and_then(|a| lookup(&i.symbols, a)))
+                        .map(|s| s.value);
+                    (
+                        format!("{}#{:016x}", m.path, image.map_or(0, |i| i.fingerprint)),
+                        if raw.starts_with("0x") {
+                            offset
+                        } else {
+                            symbol.unwrap_or(offset)
+                        },
+                    )
+                })
+                .unwrap_or_else(|| (format!("unmapped-pid-{pid}"), address))
+        };
+        // Resolved functions merge their return addresses; unresolved addresses
+        // remain distinct. Image path is retained to disambiguate shared names.
+        let identity = if raw.starts_with("0x") {
+            format!("{image}@{offset:x}")
+        } else {
+            if kernel {
+                format!("{image}!{raw}")
+            } else {
+                format!("{image}@{offset:x}!{raw}")
+            }
+        };
+        let info = crate::flame::FrameInfo {
+            display: demangle(&raw),
+            raw,
+            image,
+            address: offset,
+            kernel,
+        };
+        (identity, info)
     }
     /// Forget a process whose identity may have been reused.
     pub fn forget(&mut self, pid: u32) {
         self.maps.remove(&pid);
+        self.checked_images.clear();
     }
     /// Render one frame: a resolved name, or the address it stays as.
     pub fn frame(&mut self, pid: u32, address: u64, kernel: bool) -> String {
@@ -277,6 +370,19 @@ impl Symbols {
         };
         resolved.unwrap_or_else(|| format!("0x{address:x}"))
     }
+}
+
+/// Parse demangling strictly; preserve unknown or malformed names.
+pub fn demangle(name: &str) -> String {
+    if let Ok(symbol) = rustc_demangle::try_demangle(name) {
+        return format!("{symbol:#}");
+    }
+    if let Ok(symbol) = cpp_demangle::Symbol::new(name) {
+        if let Ok(name) = symbol.demangle(&cpp_demangle::DemangleOptions::default()) {
+            return name;
+        }
+    }
+    name.to_owned()
 }
 
 #[cfg(test)]
@@ -346,6 +452,7 @@ mod tests {
         // A PIE text segment mapped at a file offset that differs from its
         // virtual address: resolving without this step names the wrong symbol.
         let image = Image {
+            fingerprint: 0,
             symbols: vec![symbol(0x3000, 0x40, "work")],
             loads: vec![(0x2000, 0x3000, 0x1000)],
         };
@@ -367,6 +474,33 @@ mod tests {
         assert_eq!(symbols.frame(1, 0xdeadbeef, true), "0xdeadbeef");
         // A pid that cannot be read resolves nothing and invents nothing.
         assert_eq!(symbols.frame(u32::MAX, 0x1000, false), "0x1000");
+    }
+    #[test]
+    fn an_unreadable_mapping_never_falls_back_to_a_previous_cached_image() {
+        let mut symbols = Symbols::default();
+        symbols.maps.insert(
+            u32::MAX,
+            vec![Mapping {
+                start: 0x1000,
+                end: 0x2000,
+                offset: 0,
+                path: "/unreadable".into(),
+            }],
+        );
+        symbols.images.insert(
+            "/unreadable".into(),
+            Some(Image {
+                fingerprint: 1,
+                symbols: vec![symbol(0x10, 0x20, "stale_name")],
+                loads: vec![(0, 0, 0x1000)],
+            }),
+        );
+        assert_eq!(symbols.user(u32::MAX, 0x1010), None);
+        assert_eq!(
+            symbols.user(u32::MAX, 0x1010),
+            None,
+            "a failed freshness check must not expose the cached image on the next frame"
+        );
     }
     #[test]
     fn this_host_resolves_its_own_text_when_symbols_are_readable() {

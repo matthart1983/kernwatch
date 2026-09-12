@@ -164,7 +164,7 @@ Then validate the complete product using the matrix below. Update the requiremen
 - **Measurement:** independently computed counter deltas, units, windows, percentile populations, loss, counter reset, task/device reuse and clock boundaries.
 - **Recording:** live fixture → record → replay → export preserves identity, availability, coverage and action verification. Keep compatibility tests for supported existing recordings.
 - **Linux live:** unprivileged host, permission-restricted environment, and controlled privileged workloads on supported x86-64 and ARM64 kernels. Record kernel/BTF/probe support and overhead; do not infer attach success from compilation.
-- **Portability:** build/test all seven released target variants. macOS and Windows remain demo/replay/export viewers unless a separate native acquisition project is accepted. Linux GNU/musl variants need acquisition packaging checks as well as executable startup.
+- **Portability:** build/test all four released Linux target variants. GNU/musl variants need acquisition packaging checks as well as executable startup.
 - **UI evidence:** all 13 tabs at supported breakpoints, active and stopped capture, long names, large inventories, dense timeline, right-aligned IRQ values and key `0`. Demonstrate real capture separately from the synthetic demo.
 - **Engineering gate:** formatting, Clippy, relevant unit/workflow/render/PTY tests and release build; measure collection/UI overhead under representative load. Rerun affected tests after changes and the full suite at the release gate.
 

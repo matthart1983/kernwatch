@@ -153,7 +153,6 @@ fn missing_module_trust_metadata_stays_unknown() {
     assert_eq!(&row[4..6], &["unknown", "unknown"]);
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn outstanding_scheduler_wait_completes_and_is_invalidated_by_loss() {
     use kernwatch::tracing::{Correlator, TraceEvent};

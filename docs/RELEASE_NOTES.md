@@ -1,3 +1,16 @@
+## kernwatch v0.4.0
+
+Adds real CPU profiling to the Flame view. Press **F**, select a process, and press **Enter** to capture a 30-second profile at 49 Hz. CPU sampling sees busy loops without syscalls and supports process-wide, thread-only, and system-wide capture. Syscall-entry profiling remains available as a separate mode.
+
+- Capture user and kernel stacks, with explicit counts for failed, shallow, depth-limited, and dropped samples. Shallow stacks are a warning, not proof of missing frame pointers.
+- Read Rust and C++ demangled symbols without assigning unresolved addresses to neighbouring user symbols. Frames too narrow to draw remain available by name and share.
+- Save a baseline with **B** and compare with **D**, using sample shares or counts. Reports include `profile.json` and `stacks.folded`, plus baseline and comparison files when present.
+- Rebuild and verify both embedded BPF objects in CI using a pinned compiler. Release archives include probe provenance and third-party licenses.
+
+Validated with 166 unit/integration tests, Clippy, terminal and release smoke tests, disposable-VM probe tests, and privileged native x86-64/ARM64 CPU sampling. See [the profiling validation record](https://github.com/matthart1983/kernwatch/blob/v0.4.0/docs/PROFILING_VALIDATION.md) for scope and measurements. Every release target also runs its own build and smoke checks before publication.
+
+Linux x86-64 and ARM64 binaries are available in glibc and static musl variants. Live profiling requires sufficient BPF/perf permissions. DWARF/SFrame unwinding and off-CPU profiling are not implemented; user stacks depend on frame pointers. Differential symbol identity matches the same binary across ASLR, not rebuilt binaries.
+
 ## kernwatch v0.3.0
 
 Reworks how history is drawn and how detail panels are read.
@@ -11,6 +24,8 @@ Reworks how history is drawn and how detail panels are read.
 **Detail panels align into two columns.** Block device, cgroup, module, eBPF program and diagnose panels rendered each field as `name: value`, so values began at a different offset on every line and a wrapped value returned to the left edge. Names now share one dim column and values start at a common offset, with continuations hanging under the value.
 
 Terminal frames are bracketed with synchronized-update commands on supporting terminals, and the Linux collector schedules against a one-second deadline instead of oversleeping in 50ms steps.
+
+**macOS and Windows are dropped.** The two viewer targets built the demo and the replay of Linux recordings and nothing else: no kernel telemetry, no host controls. They are no longer built, tested or published, and the crate no longer compiles off Linux. 0.2.0 assets stay available for anyone still replaying recordings on those platforms. The release matrix is now the four Linux assets below.
 
 ## kernwatch v0.2.0
 

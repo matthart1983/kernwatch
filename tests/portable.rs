@@ -15,7 +15,7 @@ fn recording_and_report_export_work_on_the_host_platform() {
     let report = recording::export(&snapshot).unwrap();
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(report.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["files"].as_array().unwrap().len(), 8);
+    assert_eq!(manifest["files"].as_array().unwrap().len(), 9);
     for entry in manifest["files"].as_array().unwrap() {
         assert!(report.join(entry["file"].as_str().unwrap()).is_file());
     }

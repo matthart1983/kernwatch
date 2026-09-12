@@ -1,203 +1,149 @@
-# Flame graphs
+# CPU profiles and flame graphs
 
-Syscall-entry stack profiles, folded and drawn as a zoomable icicle on the
-Flame view (`F`).
+The Flame view (`F`) captures, resolves and explores stacks in the terminal.
+Live profiling defaults to CPU sampling with user and kernel stacks. Syscall-entry
+capture remains available as a separate measurement. Both export folded stacks
+for external flame graph viewers.
 
-For the planned CPU sampler, kernel stacks, symbol improvements, and profile
-comparison, see the [profiling roadmap](PROFILING_PLAN.md).
+## Capture
 
-Stacks are taken when a thread enters a syscall, so this answers "what calls
-into the kernel, and from where". It is **not** a CPU profile: a thread burning
-CPU without making syscalls produces nothing, and one blocked in a single
-`epoll_wait` produces one tall tower. The view says so on screen.
+On a live host, select a subject and press `P` in Tasks, Dense or the Flame
+picker. Captures last 30 seconds. In the Flame picker, processes are the default;
+`g` switches to individual threads. `C` switches the next capture between CPU
+and syscall-entry stacks. `P` on a graph returns to the picker; `x` stops capture
+and retains the final observations. Demo and replay never start a host capture.
 
-## What is implemented
+Explicit command-palette forms are:
 
-The spine: aggregation, symbolization, rendering and export, fed by the user
-stacks the syscall capture already collects.
+```text
+probe cpu tgid=1234 seconds=30 hz=49
+probe cpu pid=1235 seconds=30 hz=99
+probe cpu seconds=30 hz=49
+probe syscalls pid=1235 seconds=30 stack
+```
 
-- **Aggregation** (`src/flame.rs`). `Profile::add` folds one observed stack into
-  a tree keyed by frame name. Counters are sample-weighted, so every share the
-  panel reports is a share of observations rather than of insertions.
-- **Symbolization** (`src/symbols.rs`). Kernel text from `/proc/kallsyms`; user
-  text from the mapped file's own ELF symbol table, located through
-  `/proc/PID/maps`. Mapped file offsets are translated back to virtual
-  addresses through the image's `PT_LOAD` segments, which is what makes a
-  symbol in a shared library resolve to the right name.
-- **Layout** (`flame::layout`). An icicle: the root spans the panel, each child
-  takes a share of its parent proportional to its samples.
-- **Export**. Every report bundle carries `stacks.folded`, the `a;b;c 123`
-  interchange format that flamegraph.pl, inferno and speedscope read.
+CPU `tgid=` covers the selected process's existing and new threads, excluding
+child processes. CPU `pid=` selects one thread; omitting both selects the system.
+The implementation attaches a software CPU-clock perf event on every online CPU
+and filters task identity in BPF. It does not rely on inheritance from the process
+leader. Attachments require host BPF/perf privileges; failures are reported rather
+than silently narrowing scope. CPU changes between polls produce a coverage warning.
 
-## What it refuses to do
+Syscall capture selects one thread. Choosing a process for that capture selects
+its busiest observed thread, not the whole process. `u` on a Syscalls row starts
+this capture for its observed caller. A syscall-free busy loop appears in CPU
+sampling but contributes nothing to syscall-entry capture. A call entered before
+a syscall capture begins contributes no entry observation, even if still blocked.
 
-A profile is evidence, so the view would rather show less than imply more.
+CPU sampling uses a requested frequency, not an exact timer guarantee. Counts
+are CPU observations, not measured nanoseconds. Syscall counts measure entries,
+not CPU or blocked time. Never combine these units.
 
-- **No symbol is borrowed across a gap.** An address past the end of one symbol
-  and before the start of the next resolves to neither; the frame keeps its
-  hexadecimal form. A wrong name in a profile is worse than an address.
-- **No frame is widened to become visible.** Each child's width is measured
-  against its parent on its own, never against a running total, so rounding
-  cannot hand a cell to whichever equal sibling happened to be last. Frames
-  narrower than one column fold into a `…` stand-in where there is room for
-  one, and are counted in `hidden` where there is not.
-- **Truncated stacks are counted, not repaired.** See below.
-- **Restricted kernel symbols are detected, not rendered.** Where
-  `kptr_restrict` hides addresses, `/proc/kallsyms` reports every symbol at
-  zero. The table is discarded rather than used to produce a profile of
-  nothing.
+## Read the graph
 
-## Frame pointers
+- `←` / `→` move between siblings; `↓` enters the heaviest callee; `↑` returns.
+- `h` starts at the zoomed root and follows the heaviest path to its end.
+- `Enter` zooms to the cursor; `Esc` unwinds cursor and zoom before leaving.
+- `/` searches readable frame names. Matching stack counts count each observed
+  stack once even when several frames match.
+- The detail panel shows the selected frame's share, own observations, path,
+  and image/raw symbol when available.
 
-User stacks are walked through frame pointers by `bpf_get_stackid`. Fedora 38+
-and Ubuntu 24.04+ compile with `-fno-omit-frame-pointer`, but plenty of
-software does not, and older distributions do not.
+Widths are proportional with integer-column rounding. Sub-column siblings fold
+into a `…` marker when space permits; the details name omitted callees and their
+shares. Cursor-path frames may be widened to one column so they remain visible.
+The numeric share remains authoritative. Terminal height and width still limit
+what can be drawn at once.
 
-Where they are missing the walk ends after one or two frames. The dangerous
-part is that this looks like a *shallow profile* rather than a *broken* one, so
-the share of samples whose stack ended at or below `flame::SHALLOW` frames is
-counted and reported in the panel subtitle as `N% truncated`.
+## Capture quality and symbols
 
-Reconstructing those stacks needs DWARF `.eh_frame` unwinding — a project in
-itself, and what `perf --call-graph=dwarf` and parca do — or SFrame, which is
-new and needs a recent kernel. Neither is implemented.
+The view and `profile.json` retain attempted observations, usable user and kernel
+stacks, failed and partial observations, walk errors by domain/errno, stack-map
+read failures, map insertion failures, unresolved frames, and depth-limit hits.
+CPU samples may have only one usable domain. In particular, a user-mode sample
+can have no kernel stack; that does not invalidate its user stack.
 
-## Closing the gap with perf and flamegraph.pl
+“Shallow” means at most two user frames, measured before adding kernel frames.
+Its percentage is over usable user stacks for CPU captures. It is a heuristic:
+a legitimately short stack can be shallow and an incomplete stack can be longer.
+A stack reaching the configured 127-address limit is counted separately; that
+also indicates a limit was reached rather than proving how much was omitted.
+Failed walks do not become successful observations in the graph.
 
-Where this is ahead: nothing is silently dropped, truncated stacks are counted
-and reported, no symbol is guessed across a gap, and capture and analysis are
-the same place. Where it is behind: the data itself. `perf` samples the CPU;
-this samples syscall entry. That is the gap, and it is mostly one program away.
+Errno 14 does not prove missing frame pointers. Where a binary omits them,
+rebuilding with `-fno-omit-frame-pointer` may improve the walk. DWARF and SFrame
+unwinding are not implemented. Old recordings remain readable and explicitly
+lack the new diagnostics; absent metadata is not interpreted as zero failures.
 
-### Phase 0 — build the probe object in CI
+User symbols come from executable mappings and their own ELF function tables,
+with file offsets translated through `PT_LOAD`. Sized symbols do not extend
+across gaps; unsized user symbols resolve only at their exact start. Deleted,
+unreadable or unmapped images retain unresolved addresses. Rust and Itanium C++
+names are demangled only when parsing succeeds. Structured profiles keep raw
+names, display names, image fingerprints and image-relative function identities
+separate. Different images or same-name functions at different addresses do not
+merge merely because their display labels match.
 
-Nothing builds `probes/kernwatch.bpf.o`. It is checked in, built by hand, and
-neither `ci.yml` nor `release.yml` mentions clang or `probes/`, so an edit to
-`kernwatch.bpf.c` can ship against a stale object with no warning.
+Kernel symbols come from `/proc/kallsyms`. Restricted or unavailable tables leave
+addresses unresolved. Kernel symbol extents are estimates bounded by the next
+symbol and a 64 KiB ceiling; the capture records that caveat. Kernel stacks in a
+CPU capture show sampled kernel execution. A stack at syscall entry alone would
+only describe that entry instant.
 
-A CI job that installs clang, runs `probes/build.sh`, and fails when the
-rebuilt object differs from the checked-in one closes that hazard and unblocks
-every item below for anyone without a local BPF-capable clang. Do this first
-whatever else is chosen.
+## Compare captures
 
-### Phase 1 — kernel stacks
+Press `B` to retain the current profile as a baseline. Capture another workload,
+then press `D` to compare sample shares. Commands provide explicit control:
 
-`kw_sys_enter` calls `stack_id(ctx, &stacks, 256)`; flag `256` is
-`BPF_F_USER_STACK`. A second call with flags `0` yields the kernel stack.
-Carry both ids on the event and append the kernel frames beneath the user
-frames.
+```text
+profile-baseline
+profile-baseline kernwatch-report-123/baseline.profile.json
+profile-diff share
+profile-diff counts
+profile-diff off
+```
 
-The userspace half already exists: `Symbols::kernel` parses `/proc/kallsyms`,
-detects `kptr_restrict`, and is covered by unit tests. This is a struct field
-and a second lookup, and it shows what the kernel does with the syscall —
-currently the missing half of every stack.
+A report's `profile.json` can also be loaded as the baseline. Both captures must
+have known, matching kinds and units. Unknown older profiles and bare folded
+files are not silently assigned a measurement type. Scope, duration and requested
+frequency differences produce warnings.
 
-### Phase 2 — CPU sampling
+The comparison icicle includes added and removed paths. Its width is the union
+of paths, using the larger baseline/current count for each terminal path; colour
+and signed numbers encode the change. The list below shows inclusive baseline
+and current counts and changes. Red means growth; green means reduction. Share
+mode reports percentage-point changes, while counts mode subtracts observations
+without normalization. Use arrows or Page Up/Down to scroll the list, `/` to
+filter, and `Esc` to return to the current capture.
 
-A `SEC("perf_event")` program on `PERF_COUNT_SW_CPU_CLOCK` at 49 Hz, capturing
-both stack ids.
+Matching survives address randomization of the same executable images. Changed
+image contents get new fingerprints and may appear as added/removed paths;
+matching functions across rebuilt binaries is a remaining limitation.
 
-Aggregate **in the kernel**: a hash map keyed by `{user_id, kernel_id, tgid}`
-counting samples, drained at the end. 99 Hz across 24 CPUs for 30 s is ~71k
-events at ~200 B through the ring buffer — about 14 MB — to produce numbers
-that are only going to be summed. `bcc`'s `profile` aggregates in-kernel for
-the same reason.
+## Export and implementation
 
-`aya`'s `PerfEvent::attach` supplies the scope directly, so no BPF-side filter
-is needed:
+`e` exports `stacks.folded` and `profile.json` with the normal report. A retained
+baseline adds `baseline.stacks.folded` and `baseline.profile.json`; an active
+comparison also adds `comparison.json`. Every payload appears in the manifest.
+Folded exports use readable names, while the JSON preserves frame identity,
+quality and capture metadata.
 
-- `PerfEventScope::OneProcessAnyCpu { pid }` with `inherit: true` — a whole
-  process and the children it spawns
-- `PerfEventScope::AllProcessesOneCpu { cpu }`, attached per CPU — system wide
+CPU aggregation is a bounded per-CPU hash. Live reads apply cumulative deltas
+without deleting active counters. Stopping detaches sampling before the final
+read. Task start and exec identities prevent reuse of cached stacks across those
+identity changes; unavailable images remain unresolved. User mappings are read
+when a new stack is resolved, so mapping changes before resolution remain a
+limitation without a full mapping-event history.
 
-One program therefore delivers a real CPU profile, process-wide capture, and
-system-wide profiling together. It is the highest-value item by a distance: it
-changes what the tool measures rather than how it presents it. The C can stay
-in the existing minimal-header style, since `bpf_perf_event_data` is only
-passed through to the helper and can remain opaque.
+Default limits are 8,192 stack entries of 127 addresses and 8,192 counter keys.
+The counter values alone cost `8192 × possible CPUs × 8` bytes, in addition to
+keys, kernel bookkeeping, stack storage (about 8 MiB), the existing 16 MiB ring,
+and userspace symbol/profile storage. CPU `entries=N` bounds both maps from
+1 to 8,192 entries; pressure is counted, never silently treated as completeness.
 
-### Phase 3 — readable symbols
-
-Rust and C++ frames render mangled. `rustc-demangle` is small and has no
-dependencies; Itanium C++ demangling is a larger commitment and `cpp_demangle`
-is a real dependency to weigh against a six-crate manifest.
-
-Whichever is used, keep the existing rule: demangle only when the mangled form
-parses, and otherwise leave the symbol exactly as captured.
-
-### Phase 4 — differential profiles
-
-Entirely userspace. Keep a baseline profile, compute per-frame deltas, and
-render them diverging — grew against shrank. Regression work is where profiles
-earn their keep, and `stacks.folded` is already the interchange format to diff
-a saved run against.
-
-Worth taking before DWARF: more value, far less risk.
-
-### Phase 5 — DWARF unwinding, deferred
-
-Walking stacks without frame pointers means capturing register state and a
-stack copy in BPF, then evaluating `.eh_frame` CFI in userspace — what
-`perf --call-graph=dwarf` and parca do, and a project in its own right.
-
-The present behaviour is the honest fallback: detect the truncation and report
-the share. Revisit only if profiling frame-pointer-less binaries becomes the
-main use.
-
-### Order
-
-0 → 1 → 2 closes most of the gap, then 4, then 3. After phase 2 the honest
-summary changes from a better lens on a narrower picture to a better lens on
-the same one.
-
-## Collecting a profile
-
-`P` profiles the selected subject, from wherever it is selected: the Flame
-view's own list, Tasks, Dense, or a syscall row on Syscalls (`u`, which takes
-the observed caller as its subject). There is one action, one duration, and no
-staged command to confirm. `: probe syscalls pid=TID seconds=N stack` remains
-for the unusual case.
-
-With nothing captured, the Flame view lists what it could profile: processes by
-default, ranked by CPU, `g` to list every thread instead. Kernel threads are not
-offered — their stacks are not in user space, so a capture on one can only come
-back empty.
-
-### What one capture actually covers
-
-The probe filters on a **thread** id (`bpf_get_stackid` is attached to
-`raw_tp/sys_enter`, and the filter compares `bpf_get_current_pid_tgid()`'s low
-word). Selecting a process therefore captures its busiest thread, and the panel
-says which thread and how many others were left out. To capture a different one,
-switch the picker to threads with `g`.
-
-Capturing a whole process would need the filter to compare the TGID instead,
-which means rebuilding `probes/kernwatch.bpf.o` with a BPF-capable Clang.
-
-## Reading the view
-
-The cursor reads the picture, and can sit on any frame without zooming to it:
-
-- `←` `→` step between siblings, which are drawn side by side.
-- `↓` goes into the heaviest callee, `↑` back to the caller.
-- `h` follows the heaviest callee all the way down — where an investigation
-  usually starts.
-- `Enter` zooms to the frame under the cursor, making it the root; `Esc`
-  unwinds the cursor, then the zoom, then leaves the view.
-
-Arrow keys move the time cursor everywhere else in kernwatch. They do not here:
-rewinding the clock would swap the profile out from under the reader.
-
-The panel under the graph leads with the frame the cursor is on — its share,
-what it keeps for itself, its heaviest callee, and the whole path to it — and
-the subject and its caveats follow. Frames wide enough carry their share in the
-graph itself, so two can be compared without selecting each in turn.
-
-- `/` searches; every frame whose name matches is marked wherever it appears,
-  and the subtitle counts the matches and the stacks passing through them.
-- `P` chooses another subject; `x` stops a running capture and keeps what it
-  collected.
-- While a capture runs the subtitle counts it down (`18s of 30s`), so a quiet
-  capture is distinguishable from a broken one.
-- The subtitle reports stacks, the truncated share, and how many carry an
-  unresolved address.
+`probes/build.sh` builds x86-64 and aarch64 objects. Verification pins Fedora
+Clang 22.1.8-4.fc44 and rebuilds in another directory to reject stale or
+non-reproducible objects. CI supplies these objects and provenance to Rust builds
+and runs privileged sampling checks on both runner architectures. See the
+[implementation plan](PROFILING_PLAN.md) and [verification record](PROFILING_VALIDATION.md)
+for remaining scope and actual validation results.

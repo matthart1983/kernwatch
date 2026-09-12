@@ -1,0 +1,47 @@
+name: Build and validate BPF probes
+on:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: false
+permissions:
+  contents: read
+jobs:
+  objects:
+    runs-on: ubuntu-latest
+    container: fedora:44
+    steps:
+      - name: Install pinned BPF compiler
+        run: dnf install -y clang-22.1.8-4.fc44 llvm-22.1.8-4.fc44 git python3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - name: Verify source matches both objects
+        run: python3 scripts/verify_probes.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: bpf-probes
+          path: dist/probes/*
+          if-no-files-found: error
+  live:
+    needs: objects
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: bpf-probes
+          path: probes
+      - name: Build frame-pointer workload and sampler
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          RUSTFLAGS='-C force-frame-pointers=yes' cargo +1.98.0 build --locked --release --example cpu_smoke
+      - name: Load, attach, sample and detach on the runner kernel
+        run: sudo target/release/examples/cpu_smoke

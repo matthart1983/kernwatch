@@ -195,7 +195,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut duration = Duration::from_secs(30);
         while !ts.load(Ordering::Relaxed) {
             while let Ok(mode) = probe_rx.try_recv() {
-                session = None;
+                finish_trace(&mut session, &mut td.lock().unwrap().0);
                 mark_trace_stopped(&mut td.lock().unwrap().0);
                 if mode == "stop" {
                     td.lock().unwrap().1 = "Trace stopped".into();
@@ -226,7 +226,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(s) = session.as_mut() {
                 if let Err(e) = s.poll() {
                     td.lock().unwrap().1 = format!("Trace read failed: {e}");
-                    session = None;
+                    finish_trace(&mut session, &mut td.lock().unwrap().0);
                     mark_trace_stopped(&mut td.lock().unwrap().0);
                 } else {
                     let mut telemetry = kernwatch::domain::Telemetry {
@@ -237,8 +237,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     td.lock().unwrap().0 = Some(telemetry);
                 }
             }
-            if session.is_some() && started.elapsed() > duration {
-                session = None;
+            if session.is_some() && (started.elapsed() > duration || session.as_ref().is_some_and(kernwatch::probes::Probes::stopped)) {
+                finish_trace(&mut session, &mut td.lock().unwrap().0);
                 let mut state = td.lock().unwrap();
                 mark_trace_stopped(&mut state.0);
                 state.1 = format!(
@@ -454,5 +454,15 @@ fn mark_trace_stopped(data: &mut Option<kernwatch::domain::Telemetry>) {
         }
         data.details
             .retain(|key, _| !key.starts_with("wake:") && !key.starts_with("wakecpu:"));
+    }
+}
+
+fn finish_trace(session: &mut Option<kernwatch::probes::Probes>, data: &mut Option<kernwatch::domain::Telemetry>) {
+    if let Some(mut probe) = session.take() {
+        let result = probe.finish();
+        let mut telemetry = kernwatch::domain::Telemetry { at_ms: kernwatch::enrich::monotonic_ms(), ..Default::default() };
+        probe.apply(&mut telemetry);
+        if let Err(error) = result { telemetry.profile.metadata.warnings.push(format!("Final capture read failed: {error}")); }
+        *data = Some(telemetry);
     }
 }

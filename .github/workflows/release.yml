@@ -20,7 +20,12 @@ defaults:
 env:
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 jobs:
+  probes:
+    uses: ./.github/workflows/probes.yml
+    with:
+      ref: ${{ inputs.tag || github.sha }}
   build:
+    needs: probes
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -38,19 +43,14 @@ jobs:
           - target: aarch64-unknown-linux-musl
             asset: kernwatch-linux-aarch64-static
             os: ubuntu-24.04-arm
-          - target: x86_64-apple-darwin
-            asset: kernwatch-macos-x86_64
-            os: macos-15-intel
-          - target: aarch64-apple-darwin
-            asset: kernwatch-macos-aarch64
-            os: macos-15
-          - target: x86_64-pc-windows-msvc
-            asset: kernwatch-windows-x86_64.exe
-            os: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: bpf-probes
+          path: probes
       - name: Validate version tag
         if: github.ref_type == 'tag' || inputs.tag
         run: |
@@ -81,7 +81,6 @@ jobs:
         run: |
           python3 scripts/release_smoke.py "$TARGET"
       - name: Terminal smoke tests
-        if: runner.os != 'Windows'
         run: |
           python3 scripts/pty_smoke.py
           python3 scripts/demo_smoke.py
@@ -117,5 +116,5 @@ jobs:
           cd dist
           sha256sum --check ./*.sha256
           cat ./*.sha256 > SHA256SUMS
-          gh release create "$RELEASE_TAG" --verify-tag --draft --title "kernwatch $RELEASE_TAG" --notes-file ../docs/RELEASE_NOTES.md ./*.tar.gz ./*.zip ./*.sha256 SHA256SUMS
+          gh release create "$RELEASE_TAG" --verify-tag --draft --title "kernwatch $RELEASE_TAG" --notes-file ../docs/RELEASE_NOTES.md ./*.tar.gz ./*.sha256 SHA256SUMS
           gh release edit "$RELEASE_TAG" --draft=false

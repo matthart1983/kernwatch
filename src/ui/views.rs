@@ -1741,8 +1741,6 @@ fn syscall_empty(f: &mut Frame, r: Rect, a: &App) {
     lines.push(String::new());
     if a.replay.is_some() {
         lines.push("This recording contains no syscall rows. Open a recording made during syscall capture.".into());
-    } else if !cfg!(target_os = "linux") {
-        lines.push("Live capture requires Linux. Use --demo or replay a Linux recording.".into());
     } else if !a.snapshot.demo {
         lines.extend([
             "Press l to capture all visible system syscalls for 30 seconds.".into(),
@@ -3345,6 +3343,10 @@ fn flame_root(a: &App) -> (&crate::flame::Node, Vec<String>) {
 }
 
 fn flame(f: &mut Frame, r: Rect, a: &App) {
+    if let (Some(mode), Some(baseline)) = (a.flame_compare, &a.flame_baseline) {
+        flame_difference(f, r, a, baseline, mode);
+        return;
+    }
     if a.flame_picking() {
         flame_picker(f, r, a);
         return;
@@ -3367,7 +3369,8 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
         f,
         bands[0],
         format!(
-            " ←→ sibling · ↓ callee · ↑ caller · h hottest · ↵ zoom · Esc back · / find{}",
+            " {} samples · ←→ sibling · ↓ callee · ↑ caller · h hottest · ↵ zoom · Esc back · / find{}",
+            profile.root.samples,
             if a.snapshot.demo {
                 " · demo fixture"
             } else {
@@ -3389,16 +3392,16 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
         if let (Capture::Running, Some((elapsed, total))) = (capture_state(a), flame_progress(a)) {
             parts.push(format!("{elapsed}s of {total}s"));
         }
-        parts.push(format!("{} stacks", root.samples));
+        parts.push(format!("{} samples", root.samples));
         if let Some(share) = profile.shallow_share().filter(|s| *s > 0.) {
-            parts.push(format!("{share:.0}% truncated"));
+            parts.push(format!("{share:.0}% shallow user stacks"));
         }
         if profile.unresolved > 0 {
             parts.push(format!("{} unresolved", profile.unresolved));
         }
         if !a.filter.is_empty() {
             let needle = a.filter.to_lowercase();
-            let (frames, samples) = matching_frames(root, &needle);
+            let (frames, samples) = matching_frames(root, &needle, profile);
             parts.push(format!(
                 "{frames} frames matching {:?} · {samples} stacks",
                 a.filter
@@ -3415,7 +3418,10 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
         format!("{subject} · {}", zoom.join(" › "))
     };
     let area = p(f, bands[1], a, 1, &title, &subtitle);
-    let cells = crate::flame::layout(root, area.width, area.height, &a.flame_cursor);
+    let mut cells = crate::flame::layout(root, area.width, area.height, &a.flame_cursor);
+    for cell in &mut cells.cells {
+        cell.name = profile.label(&cell.name).to_owned();
+    }
     // The cursor can sit on any frame, so the highlighted cell is the one
     // whose path matches it rather than a child of the root.
     let selected = cells
@@ -3432,14 +3438,29 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
     } else {
         icicle(f, area, &cells.cells, selected, &a.filter.to_lowercase());
     }
-    let detail = p(f, bands[2], a, 2, "subject / frame", "syscall-entry stacks");
+    let detail = p(
+        f,
+        bands[2],
+        a,
+        2,
+        "subject / frame",
+        if profile.metadata.kind == crate::flame::Kind::Cpu {
+            "CPU samples"
+        } else {
+            "syscall-entry stacks"
+        },
+    );
     // Lead with the frame under the cursor: that is what the reader is
     // investigating. The subject and its caveats follow it.
     let mut fields = Vec::new();
     match a.flame_frame() {
         Some(node) if !a.flame_cursor.is_empty() => {
             let share = node.samples as f64 / root.samples.max(1) as f64 * 100.;
-            fields.push(("frame".into(), node.name.clone()));
+            fields.push(("frame".into(), profile.label(&node.name).to_owned()));
+            if let Some(info) = profile.frames.get(&node.name) {
+                fields.push(("image".into(), info.image.clone()));
+                fields.push(("raw symbol".into(), info.raw.clone()));
+            }
             fields.push((
                 "stacks".into(),
                 format!("{} · {share:.1}% of {}", node.samples, root.name),
@@ -3461,12 +3482,19 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
                     format!(
                         "{} · heaviest {} at {:.1}%",
                         node.children.len(),
-                        heaviest.name,
+                        profile.label(&heaviest.name),
                         heaviest.samples as f64 / node.samples.max(1) as f64 * 100.
                     )
                 },
             ));
-            fields.push(("path".into(), a.flame_path().join(" › ")));
+            fields.push((
+                "path".into(),
+                a.flame_path()
+                    .iter()
+                    .map(|id| profile.label(id))
+                    .collect::<Vec<_>>()
+                    .join(" › "),
+            ));
         }
         _ => {
             fields.push((
@@ -3487,11 +3515,11 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
         let folded: Vec<String> = parent
             .children
             .iter()
-            .filter(|c| !drawn.contains(c.name.as_str()))
+            .filter(|c| !drawn.contains(profile.label(&c.name)))
             .map(|c| {
                 format!(
                     "{} {:.1}%",
-                    c.name,
+                    profile.label(&c.name),
                     c.samples as f64 / root.samples.max(1) as f64 * 100.
                 )
             })
@@ -3523,6 +3551,9 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
 
 /// What the profile is of.
 fn flame_subject(a: &App) -> String {
+    if t(a).profile.metadata.kind == crate::flame::Kind::Cpu {
+        return t(a).profile.source.clone();
+    }
     match &a.flame_target {
         Some(s) if s.threads > 1 => format!("{} · TID {} of {}", s.name, s.tid, s.threads),
         Some(s) => format!("{} · TID {}", s.name, s.tid),
@@ -3552,7 +3583,17 @@ enum Capture {
     None,
 }
 fn capture_state(a: &App) -> Capture {
-    match t(a).capabilities.get("syscalls") {
+    match t(a).capabilities.get(
+        if match t(a).profile.metadata.kind {
+            crate::flame::Kind::Cpu => true,
+            crate::flame::Kind::Syscalls => false,
+            crate::flame::Kind::Unknown => a.flame_cpu,
+        } {
+            "cpu"
+        } else {
+            "syscalls"
+        },
+    ) {
         Some(crate::domain::Quality::Available) => Capture::Running,
         Some(
             crate::domain::Quality::Denied(why)
@@ -3563,7 +3604,10 @@ fn capture_state(a: &App) -> Capture {
         // this it read as one that never started. Between the request and the
         // probe attaching the capability is also Stopped, and no capture has
         // identified itself yet: that is starting, not finished.
-        Some(crate::domain::Quality::Stopped) if a.flame_target.is_some() => {
+        Some(crate::domain::Quality::Stopped)
+            if a.flame_target.is_some()
+                || t(a).profile.metadata.kind == crate::flame::Kind::Cpu =>
+        {
             if t(a).details.contains_key("probe.capture_id") {
                 Capture::Finished
             } else {
@@ -3583,7 +3627,9 @@ fn flame_subject_fields(a: &App) -> Vec<(String, String)> {
         // not captured whole. Saying so beats letting the graph imply it.
         fields.push((
             "captured thread".into(),
-            if s.threads > 1 {
+            if t(a).profile.metadata.kind == crate::flame::Kind::Cpu {
+                t(a).profile.metadata.scope.clone()
+            } else if s.threads > 1 {
                 format!(
                     "{} · TID {} — the busiest of {} threads; the rest are not captured",
                     s.busiest, s.tid, s.threads
@@ -3623,19 +3669,45 @@ fn flame_subject_fields(a: &App) -> Vec<(String, String)> {
     ));
     fields.push((
         "scope".into(),
-        "stacks are taken at syscall entry; time spent on CPU between syscalls is not represented"
-            .into(),
+        if t(a).profile.metadata.kind == crate::flame::Kind::Cpu { format!("CPU observations · {} · requested {} Hz · {} CPUs", t(a).profile.metadata.scope, t(a).profile.metadata.frequency_hz, t(a).profile.metadata.cpus.len()) } else { "stacks are taken at syscall entry; time spent on CPU between syscalls is not represented".into() },
     ));
     let profile = &t(a).profile;
     if profile.shallow > 0 {
         fields.push((
-            "truncated".into(),
+            "shallow user stacks".into(),
             format!(
-                "{} of {} samples; frame pointers ended the walk early and are not reconstructed",
-                profile.shallow, profile.root.samples
+                "{} of {} samples; possible incomplete walk, not proof of truncation",
+                profile.shallow,
+                if profile.metadata.kind == crate::flame::Kind::Cpu {
+                    profile.quality.user_stacks
+                } else {
+                    profile.root.samples
+                }
             ),
         ));
     }
+    if profile.metadata.kind == crate::flame::Kind::Unknown {
+        fields.push((
+            "quality".into(),
+            "capture diagnostics unavailable in this recording".into(),
+        ));
+    } else {
+        fields.push(("quality".into(), format!("{} attempted · {} user · {} kernel · {} failed · {} partial · {} depth limit · {} map failures", profile.quality.attempted, profile.quality.user_stacks, profile.quality.kernel_stacks, profile.quality.failed, profile.quality.partial, profile.quality.depth_limit, profile.quality.map_failures)));
+    }
+    fields.extend(
+        profile
+            .quality
+            .errors
+            .iter()
+            .map(|(reason, count)| (reason.clone(), count.to_string())),
+    );
+    fields.extend(
+        profile
+            .metadata
+            .warnings
+            .iter()
+            .map(|warning| ("warning".into(), warning.clone())),
+    );
     fields
 }
 
@@ -3647,7 +3719,12 @@ fn flame_picker(f: &mut Frame, r: Rect, a: &App) {
         f,
         bands[0],
         format!(
-            " ↑↓ select · ↵ or P profile it for 30s · g {} · / filter",
+            " {} · ↑↓ select · ↵ or P 30s capture · C kind · g {} · / filter",
+            if a.flame_cpu {
+                "CPU 49 Hz"
+            } else {
+                "syscall entries"
+            },
             if threads {
                 "group by process"
             } else {
@@ -3661,7 +3738,7 @@ fn flame_picker(f: &mut Frame, r: Rect, a: &App) {
         "demo fixture · capture requires live mode".to_string()
     } else {
         format!(
-            "{} {} · kernel threads are not listed: their stacks are not in user space",
+            "{} {} · C toggles CPU/syscall capture · B baseline · D compare",
             subjects.len(),
             if threads { "threads" } else { "processes" }
         )
@@ -3719,6 +3796,31 @@ fn flame_picker(f: &mut Frame, r: Rect, a: &App) {
 /// Why a profile is empty, in the terms the reader can act on.
 fn flame_empty_lines(a: &App) -> Vec<String> {
     let mut lines = vec!["No stacks have been collected.".to_string(), String::new()];
+    if t(a).profile.metadata.kind == crate::flame::Kind::Cpu {
+        lines.push(format!(
+            "CPU attempts: {} · failed walks: {} · map failures: {}",
+            t(a).profile.quality.attempted,
+            t(a).profile.quality.failed,
+            t(a).profile.quality.map_failures
+        ));
+        lines.extend(
+            t(a).profile
+                .quality
+                .errors
+                .iter()
+                .map(|(reason, n)| format!("{n} {reason}")),
+        );
+        match capture_state(a) {
+            Capture::Refused(why) => lines.push(format!("CPU capture did not run: {why}")),
+            Capture::Running => lines
+                .push("CPU sampling is running; an idle target may yield no observations.".into()),
+            Capture::Finished => {
+                lines.push("CPU capture finished; P selects another target.".into())
+            }
+            _ => lines.push("CPU sampler is waiting to attach.".into()),
+        }
+        return lines;
+    }
     match capture_state(a) {
         Capture::Starting => {
             lines.push("The capture has been requested and the probe is attaching.".into());
@@ -3740,8 +3842,8 @@ fn flame_empty_lines(a: &App) -> Vec<String> {
                     );
                     lines.push(String::new());
                     lines.push(
-                        "`no frame pointer` means the traced binary cannot be walked; rebuild \
-                         it with -fno-omit-frame-pointer to profile it."
+                        "A walk failure can mean no frame pointer; rebuilding with \
+                         -fno-omit-frame-pointer may help. The errno does not prove the cause."
                             .into(),
                     );
                 }
@@ -3789,17 +3891,139 @@ fn flame_empty_lines(a: &App) -> Vec<String> {
 }
 
 /// How many frames match a search, and how many stacks pass through them.
-fn matching_frames(node: &crate::flame::Node, needle: &str) -> (usize, u64) {
+fn matching_frames(
+    node: &crate::flame::Node,
+    needle: &str,
+    profile: &crate::flame::Profile,
+) -> (usize, u64) {
     let mut frames = 0;
     let mut samples = 0;
-    if node.name.to_lowercase().contains(needle) {
+    if profile.label(&node.name).to_lowercase().contains(needle) {
         frames += 1;
         samples += node.samples;
     }
     for child in &node.children {
-        let (f, s) = matching_frames(child, needle);
+        let (f, s) = matching_frames(child, needle, profile);
         frames += f;
-        samples += s;
+        if !profile.label(&node.name).to_lowercase().contains(needle) {
+            samples += s;
+        }
     }
     (frames, samples)
+}
+
+fn flame_difference(
+    f: &mut Frame,
+    r: Rect,
+    a: &App,
+    baseline: &crate::flame::Profile,
+    mode: crate::flame::ComparisonMode,
+) {
+    let current = &t(a).profile;
+    let area = p(
+        f,
+        r,
+        a,
+        1,
+        "profile comparison",
+        "red grew · green shrank · :profile-diff counts|share|off",
+    );
+    let comparison = match current.compare(baseline, mode) {
+        Ok(c) => c,
+        Err(e) => {
+            text(f, area, vec![Line::raw(e)]);
+            return;
+        }
+    };
+    let unit = if mode == crate::flame::ComparisonMode::Share {
+        "percentage points"
+    } else {
+        "samples"
+    };
+    let bands = vertical(
+        area,
+        &[Constraint::Percentage(55), Constraint::Percentage(45)],
+    );
+    let union = current.comparison_union(baseline);
+    let mut layout = crate::flame::layout(&union.root, bands[0].width, bands[0].height, &[]);
+    for cell in &mut layout.cells {
+        let mut node = &union.root;
+        let mut path = Vec::new();
+        for index in &cell.path {
+            node = &node.children[*index];
+            path.push(node.name.clone());
+        }
+        if cell.folded == 0 {
+            let delta = comparison
+                .changes
+                .iter()
+                .find(|c| c.path == path)
+                .map_or(0., |c| c.delta);
+            cell.delta = Some(delta);
+            cell.name = format!("{} {delta:+.1}", union.label(&cell.name));
+        }
+    }
+    icicle(
+        f,
+        bands[0],
+        &layout.cells,
+        usize::MAX,
+        &a.filter.to_lowercase(),
+    );
+    let mut changes = comparison.changes;
+    changes.sort_by(|x, y| {
+        y.delta
+            .abs()
+            .total_cmp(&x.delta.abs())
+            .then_with(|| x.path.cmp(&y.path))
+    });
+    let mut lines = vec![
+        Line::raw(format!(
+            "{} baseline → {} current · delta in {unit}; widths = union path counts",
+            baseline.root.samples, current.root.samples
+        )),
+        Line::raw(format!(
+            "quality: baseline {} failed / {} attempts; current {} failed / {} attempts",
+            baseline.quality.failed,
+            baseline.quality.attempted,
+            current.quality.failed,
+            current.quality.attempted
+        )),
+    ];
+    lines.extend(comparison.warnings.into_iter().map(Line::raw));
+    lines.push(Line::raw(
+        "   baseline    current       delta  call path (inclusive counts)",
+    ));
+    let needle = a.filter.to_lowercase();
+    for change in changes {
+        let path = change
+            .path
+            .iter()
+            .map(|id| {
+                current
+                    .frames
+                    .get(id)
+                    .or_else(|| baseline.frames.get(id))
+                    .map_or(id.as_str(), |f| f.display.as_str())
+            })
+            .collect::<Vec<_>>()
+            .join(" › ");
+        if !path.to_lowercase().contains(&needle) {
+            continue;
+        }
+        lines.push(Line::styled(
+            format!(
+                "{:11} {:10} {:+11.2}  {}",
+                change.before, change.after, change.delta, path
+            ),
+            Style::default().fg(if change.delta > 0. {
+                Color::LightRed
+            } else if change.delta < 0. {
+                Color::LightGreen
+            } else {
+                Color::Gray
+            }),
+        ));
+    }
+    f.render_widget(Paragraph::new(lines).scroll((a.scroll, 0)), bands[1]);
 }

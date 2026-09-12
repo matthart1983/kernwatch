@@ -9,14 +9,22 @@ typedef unsigned int u32;
 #define __type(name, val) val *name
 struct { __uint(type,27); __uint(max_entries,16777216); } events SEC(".maps");
 struct { __uint(type,6); __uint(max_entries,1); __type(key,u32); __type(value,u64); } losses SEC(".maps");
-struct { __uint(type,7); __uint(max_entries,1024); __type(key,u32); __uint(value_size,256); } stacks SEC(".maps");
+struct { __uint(type,7); __uint(max_entries,8192); __type(key,u32); __uint(value_size,1016); } stacks SEC(".maps");
+struct profile_key { u64 start,exec; u32 tgid,tid; int user,kernel; };
+struct { __uint(type,5); __uint(max_entries,8192); __type(key,struct profile_key); __type(value,u64); } profile_counts SEC(".maps");
+struct { __uint(type,6); __uint(max_entries,2); __type(key,u32); __type(value,u64); } profile_stats SEC(".maps");
+struct { __uint(type,1); __uint(max_entries,8192); __type(key,u32); __type(value,u64); } profile_execs SEC(".maps");
+volatile const u64 target_start_ticks=0;
+volatile const u64 target_clock_hz=100;
+volatile const u32 target_tgid=0;
+volatile const u32 sample_tid=0;
 volatile const u32 capture_stack=0;
 volatile const u32 target_pid=0;
 volatile const u64 target_cgroup=0;
 struct kernfs_node { u64 id; } __attribute__((preserve_access_index));
 struct cgroup { struct kernfs_node *kn; } __attribute__((preserve_access_index));
 struct css_set { struct cgroup *dfl_cgrp; } __attribute__((preserve_access_index));
-struct task_struct { int pid; u64 start_boottime; struct css_set *cgroups; } __attribute__((preserve_access_index));
+struct task_struct { int pid; u64 start_boottime; u64 self_exec_id; struct task_struct *group_leader; struct css_set *cgroups; } __attribute__((preserve_access_index));
 struct gendisk { int major; int first_minor; } __attribute__((preserve_access_index));
 struct request_queue { struct gendisk *disk; } __attribute__((preserve_access_index));
 struct request { unsigned int __data_len; struct request_queue *q; } __attribute__((preserve_access_index));
@@ -31,6 +39,8 @@ struct pt_regs { unsigned long di,si,dx,r10,r8,r9; } __attribute__((preserve_acc
 #endif
 struct ctx { u64 args[0]; };
 struct event { u64 ns,key,a,b; u32 type,cpu,pid,pad; u64 args[6]; char text[80]; };
+static long (*update)(void*,const void*,const void*,u64)=(void*)2;
+static void *(*current_task)(void)=(void*)35;
 static u64 (*ktime)(void)=(void*)5;
 static u64 (*pidtgid)(void)=(void*)14;
 static u32 (*cpu_id)(void)=(void*)8;
@@ -67,3 +77,47 @@ SEC("raw_tp/block_rq_complete") int kw_block_done(struct ctx *c){return emit(9,c
 SEC("raw_tp/block_rq_requeue") int kw_block_requeue(struct ctx *c){return emit(10,c->args[0],0,0);}
 SEC("raw_tp/sched_migrate_task") int kw_migrate(struct ctx *c){return emit(11,task_pid(c->args[0]),c->args[1],task_group(c->args[0]));}
 char kw_license[] SEC("license")="GPL";
+
+/* CPU observations, independent of syscall activity. Counts are per CPU;
+ * no active map deletion and no stack ID reuse during a capture. */
+SEC("perf_event") int kw_profile(void *ctx) {
+    u64 id=pidtgid(); u32 tgid=id>>32, tid=(u32)id;
+    if (!tid || (target_tgid && tgid!=target_tgid) || (sample_tid && tid!=sample_tid)) return 0;
+    struct task_struct *task=current_task(), *identity=task;
+    if(target_tgid) read_kernel(&identity,8,&task->group_leader);
+    if(target_start_ticks) {
+        u64 start=0; read_kernel(&start,8,&identity->start_boottime);
+        u64 ticks=(start/1000000000)*target_clock_hz+(start%1000000000)*target_clock_hz/1000000000;
+        if(ticks!=target_start_ticks) return 0;
+    }
+    u32 zero=0, one=1; u64 *attempts=lookup(&profile_stats,&zero);
+    if(attempts) (*attempts)++;
+    struct profile_key key={.tgid=tgid,.tid=tid};
+    struct task_struct *leader=task; read_kernel(&leader,8,&task->group_leader);
+    read_kernel(&key.start,8,&leader->start_boottime);
+    read_kernel(&key.exec,8,&task->self_exec_id);
+    update(&profile_execs,&tgid,&key.exec,0);
+    key.user=stack_id(ctx,&stacks,256);
+    key.kernel=stack_id(ctx,&stacks,0);
+    u64 *count=lookup(&profile_counts,&key);
+    if(count) { (*count)++; return 0; }
+    u64 initial=1;
+    if(update(&profile_counts,&key,&initial,1)) {
+        count=lookup(&profile_counts,&key);
+        if(count) (*count)++;
+        else { u64 *lost=lookup(&profile_stats,&one); if(lost) (*lost)++; }
+    }
+    return 0;
+}
+
+/* Invalidate symbolization of older samples even if exec is followed by no CPU
+ * sample before the next userspace poll. */
+SEC("raw_tp/sched_process_exec") int kw_profile_exec(struct ctx *ctx) {
+    (void)ctx;
+    u32 tgid=pidtgid()>>32;
+    if(target_tgid && tgid!=target_tgid) return 0;
+    struct task_struct *task=current_task();u64 generation=0;
+    read_kernel(&generation,8,&task->self_exec_id);
+    update(&profile_execs,&tgid,&generation,0);
+    return 0;
+}

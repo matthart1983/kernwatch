@@ -4,9 +4,9 @@
 
 kernwatch is a Rust + Ratatui monitor for investigating CPU contention, task scheduling, memory pressure, block I/O, interrupts, cgroups, kernel modules, and eBPF activity. Fourteen connected views bring live counters, bounded tracing, timelines, stack profiles, and incident evidence into one keyboard-driven interface.
 
-![Guided kernwatch demo: Dense, Tasks, Scheduler, IRQ, Memory, Block, Cgroups, eBPF, and Diagnose](screenshots/demo/kernwatch-demo.gif)
+![kernwatch monitoring a live host: Dense, Tasks, Scheduler, Memory, Block, IRQ, Cgroups, eBPF, Dmesg, and Diagnose](screenshots/demo/kernwatch-live.gif)
 
-*Demo data is synthetic and clearly marked. Live mode reads the host; it does not substitute demo values for missing measurements.*
+*Recorded against a live host under a generated workload — real counters, real task list, real kernel log. The synthetic [guided tour](docs/DEMO.md) is a separate mode. Live mode does not substitute demo values for missing measurements.*
 
 [Demo](#demo) · [Quick start](#quick-start) · [Views](#views) · [Controls](#controls) · [Tracing](#tracing) · [Development](#development) · [Limitations](#limitations)
 
@@ -19,19 +19,13 @@ kernwatch is a Rust + Ratatui monitor for investigating CPU contention, task sch
 - **Inspect deeper metadata:** optional systemd properties/drop-ins, module file metadata, SMART health, journal records, and BPF program/link information.
 - **Review changes before applying:** supported task, IRQ/RPS, and cgroup controls use explicit previews, target identity checks, readback, and rollback journals.
 
-| Platform | Architectures | Supported modes |
-|---|---|---|
-| Linux | x86-64, ARM64; glibc and static musl | Live counters, optional eBPF, demo, recording and replay |
-| macOS | Intel x86-64, Apple Silicon ARM64 | Demo, Linux recording replay and report export |
-| Windows | x86-64 | Demo, Linux recording replay and report export |
-
-macOS and Windows do not collect native kernel telemetry or apply host controls. Their launch commands require `--demo-tour`, `--demo` or `--replay FILE`.
+kernwatch is Linux-only. It runs on x86-64 and ARM64, as glibc or static musl builds, and supports live counters, optional eBPF, demo, recording and replay. The macOS and Windows demo/replay viewers were removed in 0.3.0; they collected no kernel telemetry and applied no host controls.
 
 kernwatch is under active development. The [gap audit](docs/GAPS.md) and [requirement ledger](docs/COMPLETION.md) distinguish implemented features, environment restrictions, and remaining work.
 
 ## Demo
 
-Explore a simulated scheduling incident across eight views: Dense → Tasks → Scheduler → IRQ → Memory → Block → Cgroups → Diagnose. The tour connects delayed Envoy workers with CPU placement, interrupt activity and resource pressure, then presents evidence for investigation.
+Explore a simulated scheduling incident across ten views: Dense → Tasks → Scheduler → IRQ → Memory → Block → Cgroups → eBPF → Flame → Diagnose. The tour connects delayed Envoy workers with CPU placement, interrupt activity and resource pressure, then presents evidence for investigation.
 
 ```sh
 ./target/release/kernwatch --demo-tour
@@ -45,7 +39,7 @@ Demo mode needs no administrator privileges, starts no host probes and does not 
 
 ### Download a binary
 
-Get prebuilt binaries from [GitHub Releases](https://github.com/matthart1983/kernwatch/releases/latest). Linux builds are available for x86-64 and ARM64, with glibc and static musl variants. Static musl builds are recommended for portability. macOS (Intel and Apple Silicon) and Windows x86-64 builds support demo and replay of Linux recordings. Downloads are public.
+Get prebuilt binaries from [GitHub Releases](https://github.com/matthart1983/kernwatch/releases/latest). Linux builds are available for x86-64 and ARM64, with glibc and static musl variants. Static musl builds are recommended for portability. Downloads are public.
 
 With GitHub CLI authenticated:
 
@@ -62,7 +56,7 @@ Archives include the executable, license and README. Static linking removes the 
 
 ### Build from source
 
-Requirements: **Linux x86-64 or ARM64** (live monitoring), or **macOS/Windows** (demo and replay), **Rust 1.98 or newer**, and a C linker. Internet access is needed for the first dependency download.
+Requirements: **Linux x86-64 or ARM64**, **Rust 1.98 or newer**, and a C linker. Internet access is needed for the first dependency download.
 
 Clone the repository and build:
 
@@ -109,7 +103,7 @@ Use **160 columns** for the full dashboard. Compact layouts work at **80×24**, 
 | `b` | eBPF | Programs, maps, links, runtime counters, and capture overhead |
 | `m` | Dmesg | Kernel/journal events and source health |
 | `d` | Diagnose | Evidence, hypotheses, action previews, and verification |
-| `F` | Flame | Folded stacks from a capture, as a zoomable icicle |
+| `F` | [Flame](docs/FLAME_GRAPHS.md) | CPU/syscall stack capture, zoomable icicles, and baseline comparison |
 
 <details>
 <summary>More screenshots</summary>

@@ -32,7 +32,7 @@ Reviewed against SCREEN-06 and SCREEN-10 and the reference diagrams on 11 Septem
 
 ## Permission-dependent data
 
-Linux BPF enumeration, translated instructions, kernel symbols, runtime statistics and capture attachment depend on kernel support and privileges. Those failures should appear as acquisition states and reasons; they are distinct from the implementation gaps above. macOS and Windows remain demo/replay viewers.
+Linux BPF enumeration, translated instructions, kernel symbols, runtime statistics and capture attachment depend on kernel support and privileges. Those failures should appear as acquisition states and reasons; they are distinct from the implementation gaps above.
 
 ## Verification
 

@@ -25,13 +25,7 @@ fn empty_live_tab_explains_capture_and_persists_failure_at_both_sizes() {
         .capabilities
         .insert("syscalls".into(), Quality::Stopped);
     a.switch(5);
-    // Only Linux offers the capture, so only Linux offers the key for it.
-    // Elsewhere the panel has to say why the tab stays empty instead.
-    let offer = if cfg!(target_os = "linux") {
-        "Press l"
-    } else {
-        "Live capture requires Linux"
-    };
+    let offer = "Press l";
     for (w, h) in [(80, 24), (160, 52)] {
         let screen = render(&a, w, h);
         assert!(
