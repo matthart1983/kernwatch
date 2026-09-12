@@ -1,6 +1,26 @@
 # Review the kernwatch demo
 
-The guided demo uses a synthetic incident and runs without host probes.
+kernwatch has two previews. The **live recording** in the README shows the release
+binary reading the real host. The **guided demo** below uses a synthetic incident
+and runs without host probes.
+
+## Record the live preview
+
+```sh
+python3 scripts/live_demo.py
+```
+
+This needs [vhs](https://github.com/charmbracelet/vhs) and FFmpeg. It starts a
+bounded CPU/block/memory workload (`scripts/live_load.py`), runs the real binary
+in a 160x52 terminal for a warm-up minute so the one-second history columns fill,
+then records the navigation in `scripts/live_demo.tape` to
+`screenshots/demo/kernwatch-live.gif` and a matching MP4. The workload and its
+scratch files are removed when the recording ends.
+
+The recording shows the recording host: its process names, cgroups, devices and
+kernel log. Review the frames before publishing a new one.
+
+## The guided demo
 
 ## Run it locally
 

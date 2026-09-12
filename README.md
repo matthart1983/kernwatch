@@ -4,9 +4,9 @@
 
 kernwatch is a Rust + Ratatui monitor for investigating CPU contention, task scheduling, memory pressure, block I/O, interrupts, cgroups, kernel modules, and eBPF activity. Thirteen connected views bring live counters, bounded tracing, timelines, and incident evidence into one keyboard-driven interface.
 
-![Guided kernwatch demo: Dense, Tasks, Scheduler, IRQ, Memory, Block, Cgroups, eBPF, and Diagnose](screenshots/demo/kernwatch-demo.gif)
+![kernwatch monitoring a live host: Dense, Tasks, Scheduler, Memory, Block, IRQ, Cgroups, eBPF, Dmesg, and Diagnose](screenshots/demo/kernwatch-live.gif)
 
-*Demo data is synthetic and clearly marked. Live mode reads the host; it does not substitute demo values for missing measurements.*
+*Recorded against a live host under a generated workload — real counters, real task list, real kernel log. The synthetic [guided tour](docs/DEMO.md) is a separate mode. Live mode does not substitute demo values for missing measurements.*
 
 [Demo](#demo) · [Quick start](#quick-start) · [Views](#views) · [Controls](#controls) · [Tracing](#tracing) · [Development](#development) · [Limitations](#limitations)
 
