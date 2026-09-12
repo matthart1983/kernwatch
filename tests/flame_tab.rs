@@ -124,3 +124,34 @@ fn an_exported_report_carries_the_folded_stacks() {
     assert!(path.contains(';'), "frames are separated by semicolons");
     assert!(count.parse::<u64>().is_ok(), "the line ends in a count");
 }
+
+#[test]
+fn a_captures_stacks_survive_polls_that_fold_nothing() {
+    // The probe thread rebuilds its telemetry every poll. A poll that folded
+    // no stacks must not erase what earlier polls collected, which is how the
+    // profile reached the view empty on a live capture.
+    let mut retained = kernwatch::flame::Profile::default();
+    let mut collected = kernwatch::flame::Profile::new("syscalls · TID 42");
+    collected.add(&["main".into(), "read".into()], 1);
+
+    let mut s = model::demo();
+    s.telemetry.profile = Default::default();
+    kernwatch::probes::merge_profile(&mut retained, &collected, true, &mut s);
+    assert_eq!(s.telemetry.profile.root.samples, 1);
+
+    // The next poll folded nothing; the view keeps what was collected.
+    let mut s = model::demo();
+    s.telemetry.profile = Default::default();
+    kernwatch::probes::merge_profile(&mut retained, &Default::default(), false, &mut s);
+    assert_eq!(s.telemetry.profile.root.samples, 1);
+    assert_eq!(s.telemetry.profile.source, "syscalls · TID 42");
+
+    // A new capture starts a new profile rather than adding to the old one.
+    let mut s = model::demo();
+    s.telemetry.profile = Default::default();
+    kernwatch::probes::merge_profile(&mut retained, &Default::default(), true, &mut s);
+    assert!(
+        s.telemetry.profile.is_empty(),
+        "stacks from two captures are not one profile"
+    );
+}

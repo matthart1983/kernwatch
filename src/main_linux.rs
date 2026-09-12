@@ -280,6 +280,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut capture_id = None;
     let mut trace_history = std::collections::BTreeMap::<String, kernwatch::domain::Series>::new();
+    let mut trace_profile = kernwatch::flame::Profile::default();
     let state_path = std::env::var_os("XDG_STATE_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| {
@@ -304,10 +305,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let data = trace_data.lock().unwrap();
                     if let Some(c) = &data.0 {
                         let id = c.details.get("probe.capture_id").cloned();
-                        if capture_id != id {
+                        let new_capture = capture_id != id;
+                        if new_capture {
                             trace_history.clear();
                             capture_id = id;
                         }
+                        kernwatch::probes::merge_profile(
+                            &mut trace_profile,
+                            &c.profile,
+                            new_capture,
+                            &mut s,
+                        );
                         s.telemetry.metrics.extend(c.metrics.clone());
                         s.telemetry.histograms.extend(c.histograms.clone());
                         s.telemetry.details.extend(c.details.clone());

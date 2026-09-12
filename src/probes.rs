@@ -965,6 +965,29 @@ pub fn syscall_name(id: u64) -> String {
         .unwrap_or_else(|| format!("syscall_{id}"))
 }
 
+/// Carry a capture's folded stacks into the snapshot the views read.
+///
+/// The probe thread rebuilds its telemetry every poll, so a poll that folded
+/// nothing must not erase what earlier polls collected. `retained` holds the
+/// last profile that had samples; a new capture resets it, because stacks from
+/// two captures are not one profile.
+pub fn merge_profile(
+    retained: &mut crate::flame::Profile,
+    captured: &crate::flame::Profile,
+    new_capture: bool,
+    s: &mut crate::model::Snapshot,
+) {
+    if new_capture {
+        *retained = crate::flame::Profile::default();
+    }
+    if !captured.is_empty() {
+        *retained = captured.clone();
+    }
+    if !retained.is_empty() {
+        s.telemetry.profile = retained.clone();
+    }
+}
+
 pub fn hydrate(s: &mut crate::model::Snapshot) {
     for row in &mut s.views[9].rows {
         if row.len() >= 9
