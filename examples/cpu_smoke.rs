@@ -27,6 +27,18 @@ fn deep_stack(depth: u32, stop: Arc<AtomicBool>, work: Arc<AtomicU64>) -> u64 {
         std::hint::black_box(value ^ depth as u64)
     }
 }
+fn resident_kib() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|text| {
+            text.lines().find_map(|line| {
+                line.strip_prefix("VmRSS:")
+                    .and_then(|v| v.split_whitespace().next())
+                    .and_then(|n| n.parse().ok())
+            })
+        })
+        .expect("VmRSS must be available for the memory benchmark")
+}
 fn worker(stop: &Arc<AtomicBool>, work: &Arc<AtomicU64>) -> (std::thread::JoinHandle<u64>, u32) {
     let (tx, rx) = mpsc::channel();
     let stop = stop.clone();
@@ -81,11 +93,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let baseline = (work.load(Ordering::Relaxed) - initial) / 2;
     println!("BASELINE iterations_per_second={baseline}");
     for hz in [49, 99] {
+        let memory_before = resident_kib();
         let mut probe = Probes::start(&format!("cpu tgid={pid} seconds=3 hz={hz}"))?;
         let (after, after_tid) = worker(&stop, &work);
         workers.push(after);
         let initial = work.load(Ordering::Relaxed);
         collect(&mut probe, 3)?;
+        println!("MEMORY_RSS hz={hz} before_kib={memory_before} captured_kib={} (includes workload threads)", resident_kib());
         let sampled_rate = (work.load(Ordering::Relaxed) - initial) / 3;
         let reference_start = work.load(Ordering::Relaxed);
         std::thread::sleep(Duration::from_secs(2));
