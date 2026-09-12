@@ -272,7 +272,13 @@ impl Symbols {
         use std::os::unix::fs::MetadataExt;
         let file = format!("/proc/{pid}/root{}", mapping.path);
         if self.checked_images.insert(mapping.path.clone()) {
-            let stat = std::fs::metadata(&file).ok()?;
+            let stat = match std::fs::metadata(&file) {
+                Ok(stat) => stat,
+                Err(_) => {
+                    self.images.insert(mapping.path.clone(), None);
+                    return None;
+                }
+            };
             let version = (
                 stat.dev(),
                 stat.ino(),
@@ -282,7 +288,9 @@ impl Symbols {
                 stat.ctime(),
                 stat.ctime_nsec(),
             );
-            if self.image_versions.get(&mapping.path) != Some(&version) {
+            if self.image_versions.get(&mapping.path) != Some(&version)
+                || self.images.get(&mapping.path).is_some_and(Option::is_none)
+            {
                 self.images.remove(&mapping.path);
                 self.image_versions.insert(mapping.path.clone(), version);
             }
@@ -466,6 +474,33 @@ mod tests {
         assert_eq!(symbols.frame(1, 0xdeadbeef, true), "0xdeadbeef");
         // A pid that cannot be read resolves nothing and invents nothing.
         assert_eq!(symbols.frame(u32::MAX, 0x1000, false), "0x1000");
+    }
+    #[test]
+    fn an_unreadable_mapping_never_falls_back_to_a_previous_cached_image() {
+        let mut symbols = Symbols::default();
+        symbols.maps.insert(
+            u32::MAX,
+            vec![Mapping {
+                start: 0x1000,
+                end: 0x2000,
+                offset: 0,
+                path: "/unreadable".into(),
+            }],
+        );
+        symbols.images.insert(
+            "/unreadable".into(),
+            Some(Image {
+                fingerprint: 1,
+                symbols: vec![symbol(0x10, 0x20, "stale_name")],
+                loads: vec![(0, 0, 0x1000)],
+            }),
+        );
+        assert_eq!(symbols.user(u32::MAX, 0x1010), None);
+        assert_eq!(
+            symbols.user(u32::MAX, 0x1010),
+            None,
+            "a failed freshness check must not expose the cached image on the next frame"
+        );
     }
     #[test]
     fn this_host_resolves_its_own_text_when_symbols_are_readable() {
