@@ -4,7 +4,7 @@
 
 kernwatch is a Rust + Ratatui monitor for investigating CPU contention, task scheduling, memory pressure, block I/O, interrupts, cgroups, kernel modules, and eBPF activity. Fourteen connected views bring live counters, bounded tracing, timelines, stack profiles, and incident evidence into one keyboard-driven interface.
 
-![Real CPU profiling: choose a process, capture stacks, save a baseline, and compare a changed workload](screenshots/demo/kernwatch-profiling.gif)
+![Real CPU profiling: choose a process, capture stacks, save a baseline, and compare a changed workload](https://raw.githubusercontent.com/matthart1983/kernwatch/main/screenshots/demo/kernwatch-profiling.gif)
 
 *Recorded from the release binary in a disposable two-CPU Linux VM. These are real CPU samples from a bounded workload: cache-heavy work first, then parse-heavy work. The comparison shows the change in sample shares; VM timings are not a performance benchmark. The synthetic [guided tour](docs/DEMO.md) is a separate mode.*
 
@@ -13,7 +13,7 @@ Press **F**, select a process and press **Enter** to capture CPU stacks. **x** s
 <details>
 <summary>Watch the broader live-host overview</summary>
 
-![Live host overview: tasks, scheduling, memory, block I/O, IRQs, cgroups and diagnosis](screenshots/demo/kernwatch-live.gif)
+![Live host overview: tasks, scheduling, memory, block I/O, IRQs, cgroups and diagnosis](https://raw.githubusercontent.com/matthart1983/kernwatch/main/screenshots/demo/kernwatch-live.gif)
 
 This separate recording shows real host counters under a generated workload. It predates the CPU profiling preview above.
 
@@ -121,15 +121,15 @@ Use **160 columns** for the full dashboard. Compact layouts work at **80×24**, 
 
 ### Tasks
 
-![Task inspection with latency and runtime histories](screenshots/current/02-tasks.png)
+![Task inspection with latency and runtime histories](https://raw.githubusercontent.com/matthart1983/kernwatch/main/screenshots/current/02-tasks.png)
 
 ### IRQ
 
-![IRQ rates, affinity, and per-CPU softirq inspection](screenshots/current/07-irq.png)
+![IRQ rates, affinity, and per-CPU softirq inspection](https://raw.githubusercontent.com/matthart1983/kernwatch/main/screenshots/current/07-irq.png)
 
 ### Diagnose
 
-![Diagnosis with evidence and a reviewed action workflow](screenshots/current/12-diagnose.png)
+![Diagnosis with evidence and a reviewed action workflow](https://raw.githubusercontent.com/matthart1983/kernwatch/main/screenshots/current/12-diagnose.png)
 
 </details>
 

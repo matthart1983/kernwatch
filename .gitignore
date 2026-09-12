@@ -4,6 +4,7 @@
 /.*-report-*.partial/
 /*.kwr
 /*-actions-*.json
+/probes/provenance.json
 /tests/*.txt
 /tests/*.ansi
 /tests/vm/*.log
