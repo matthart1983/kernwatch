@@ -47,6 +47,49 @@ fn kv(p: &str) -> BTreeMap<String, String> {
         })
         .collect()
 }
+/// The fields this collector uses out of `/proc/PID/status`.
+///
+/// Reading them into a map of every line allocated two Strings and a tree
+/// insert for each of ~55 lines, per task, per second. Only these are read.
+#[derive(Default)]
+struct Status {
+    voluntary: Option<u64>,
+    involuntary: Option<u64>,
+    cpus_allowed: String,
+    anon_bytes: Option<u64>,
+    file_bytes: Option<u64>,
+    shmem_bytes: Option<u64>,
+    swap_bytes: Option<u64>,
+    uid: Option<u32>,
+}
+fn status_fields(path: &str) -> Status {
+    let text = fs::read_to_string(path).unwrap_or_default();
+    let mut out = Status::default();
+    // "NNN kB" and "1000 1000 1000 1000" both want the first token.
+    let first = |v: &str| {
+        v.split_whitespace()
+            .next()
+            .and_then(|n| n.parse::<u64>().ok())
+    };
+    let kib = |v: &str| first(v).map(|n| n.saturating_mul(1024));
+    for line in text.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        match name {
+            "voluntary_ctxt_switches" => out.voluntary = first(value),
+            "nonvoluntary_ctxt_switches" => out.involuntary = first(value),
+            "Cpus_allowed_list" => out.cpus_allowed = value.trim().to_owned(),
+            "RssAnon" => out.anon_bytes = kib(value),
+            "RssFile" => out.file_bytes = kib(value),
+            "RssShmem" => out.shmem_bytes = kib(value),
+            "VmSwap" => out.swap_bytes = kib(value),
+            "Uid" => out.uid = first(value).map(|n| n as u32),
+            _ => {}
+        }
+    }
+    out
+}
 fn leading(s: &str) -> Option<f64> {
     s.split_whitespace().next()?.parse().ok()
 }
@@ -257,10 +300,8 @@ impl Enricher {
                     .previous
                     .get(&key)
                     .map(|p| ticks.saturating_sub(p[0]) as f64 / hz / dt * 100.);
-                let status = kv(&format!("{path}/status"));
-                let ctx = |name: &str| status.get(name).and_then(|v| v.parse::<u64>().ok());
-                let voluntary = ctx("voluntary_ctxt_switches");
-                let involuntary = ctx("nonvoluntary_ctxt_switches");
+                let status = status_fields(&format!("{path}/status"));
+                let (voluntary, involuntary) = (status.voluntary, status.involuntary);
                 let ctx_rate = |n: Option<u64>, i: usize| {
                     n.and_then(|n| {
                         self.previous
@@ -306,7 +347,7 @@ impl Enricher {
                         rss,
                     ],
                 );
-                let affinity = status.get("Cpus_allowed_list").cloned().unwrap_or_default();
+                let affinity = status.cpus_allowed.clone();
                 let cgroup = match self.cgroups.get(&(pid, start_ticks)) {
                     Some(known) => known.clone(),
                     None => {
@@ -319,29 +360,19 @@ impl Enricher {
                         read
                     }
                 };
-                let memory_field = |key: &str| {
-                    status
-                        .get(key)
-                        .and_then(|v| v.split_whitespace().next())
-                        .and_then(|v| v.parse::<u64>().ok())
-                        .map(|v| v.saturating_mul(1024))
-                };
                 t.tasks.push(Task {
                     nice: fields.get(16).and_then(|v| v.parse().ok()),
                     age_ms: Some(
                         t.at_ms
                             .saturating_sub((start_ticks as f64 / hz * 1000.) as u64),
                     ),
-                    anon_bytes: memory_field("RssAnon"),
-                    file_bytes: memory_field("RssFile"),
-                    shmem_bytes: memory_field("RssShmem"),
-                    swap_bytes: memory_field("VmSwap"),
+                    anon_bytes: status.anon_bytes,
+                    file_bytes: status.file_bytes,
+                    shmem_bytes: status.shmem_bytes,
+                    swap_bytes: status.swap_bytes,
                     minor_faults_s,
                     rss_growth_bytes_s,
-                    uid: status
-                        .get("Uid")
-                        .and_then(|v| v.split_whitespace().next())
-                        .and_then(|v| v.parse().ok()),
+                    uid: status.uid,
                     parent_pid: fields.get(1).and_then(|v| v.parse().ok()).unwrap_or(0),
                     tgid,
                     kernel_thread: fields

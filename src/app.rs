@@ -228,6 +228,18 @@ impl App {
         (tasks + details + events + views + coarse + profile + 4096) * 219 / 100
     }
 
+    /// Oldest and newest retained frame times, for checking how far the time
+    /// cursor can reach.
+    pub fn timeline_span(&self) -> Option<(u64, u64)> {
+        Some((
+            self.timeline_frames.front()?.1.telemetry.at_ms,
+            self.timeline_frames.back()?.1.telemetry.at_ms,
+        ))
+    }
+    /// Never thin below this many frames. It is deliberately small: when a
+    /// frame costs megabytes only a handful fit in the budget, and refusing to
+    /// thin at that size is what collapses the timeline to seconds.
+    const MIN_FULL_RESOLUTION: usize = 8;
     fn retain_frame(&mut self, snapshot: &Snapshot) {
         if self
             .timeline_frames
@@ -241,8 +253,27 @@ impl App {
         let size = Self::frame_bytes(&frame);
         self.timeline_bytes += size;
         self.timeline_frames.push_back((size, frame));
+        // A frame on a busy host holds several megabytes, so a fixed budget
+        // spent at one frame per second reaches only seconds back. Thinning the
+        // older half instead of discarding it trades resolution for reach: the
+        // recent past stays per-second, the distant past coarsens, and ten
+        // minutes remains seekable. Dropping the far end instead would lose it.
+        const BUDGET: usize = 128 * 1024 * 1024;
+        while self.timeline_bytes > BUDGET && self.timeline_frames.len() > Self::MIN_FULL_RESOLUTION
+        {
+            let half = self.timeline_frames.len() / 2;
+            let kept: VecDeque<(usize, Snapshot)> = self
+                .timeline_frames
+                .drain(..)
+                .enumerate()
+                .filter(|(index, _)| *index >= half || index % 2 == 0)
+                .map(|(_, frame)| frame)
+                .collect();
+            self.timeline_frames = kept;
+            self.timeline_bytes = self.timeline_frames.iter().map(|(size, _)| size).sum();
+        }
         while self.timeline_frames.len() > 600
-            || (self.timeline_bytes > 128 * 1024 * 1024 && self.timeline_frames.len() > 1)
+            || (self.timeline_bytes > BUDGET && self.timeline_frames.len() > 1)
         {
             if let Some((size, _)) = self.timeline_frames.pop_front() {
                 self.timeline_bytes = self.timeline_bytes.saturating_sub(size);

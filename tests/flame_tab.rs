@@ -334,3 +334,39 @@ fn profiling_again_returns_to_the_thread_list() {
         "P offers the list again once one is chosen"
     );
 }
+
+#[test]
+fn the_timeline_trades_resolution_for_reach_rather_than_dropping_history() {
+    // Frames on a busy host are megabytes, so a fixed budget spent at one per
+    // second reaches only seconds. Thinning must keep the span, not the tail.
+    let mut a = App::new(model::demo());
+    let mut snapshot = model::demo();
+    // Make each frame expensive enough that the budget binds quickly.
+    let seed = snapshot.telemetry.tasks[0].clone();
+    snapshot.telemetry.tasks = (0..4000)
+        .map(|i| {
+            let mut t = seed.clone();
+            t.pid = 1000 + i;
+            t.name = format!("worker-{i}-with-a-name-long-enough-to-cost-something");
+            t
+        })
+        .collect();
+    let base = a.snapshot.telemetry.at_ms + 1000;
+    for second in 0..400u64 {
+        snapshot.telemetry.at_ms = base + second * 1000;
+        a.update(snapshot.clone());
+    }
+    let span = a.timeline_span().expect("frames were retained");
+    assert!(
+        span.1.saturating_sub(span.0) >= 300_000,
+        "the timeline should still reach minutes back, spans {:?}",
+        span
+    );
+    // The most recent history keeps its per-second resolution.
+    assert_eq!(
+        span.1,
+        base + 399_000,
+        "the newest frame is the one just recorded"
+    );
+    assert!(span.0 < span.1, "the span runs oldest to newest");
+}
