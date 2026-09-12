@@ -54,6 +54,9 @@ pub struct Probes {
     pub target_pid: u32,
     /// Folded stacks from this capture, resolved as they arrive.
     pub profile: crate::flame::Profile,
+    /// Why stacks were or were not collected, so an empty profile can say
+    /// which of "no capture", "not requested" and "the walk failed" it is.
+    pub stack_tally: BTreeMap<String, u64>,
     symbols: crate::symbols::Symbols,
     pub start_ns: Option<u64>,
     pub last_ns: u64,
@@ -216,6 +219,7 @@ impl Probes {
             mode: mode.into(),
             target_pid: pid,
             profile: crate::flame::Profile::new(&stack_source),
+            stack_tally: BTreeMap::new(),
             symbols,
             start_ns: None,
             last_ns: 0,
@@ -263,10 +267,25 @@ impl Probes {
                 3 => ("sched_process_exit", format!("pid={}", e.key)),
                 4 => {
                     let end = e.text.iter().position(|b| *b == 0).unwrap_or(e.text.len());
+                    let mut tally = |reason: &str| {
+                        *self.stack_tally.entry(reason.to_owned()).or_default() += 1;
+                    };
                     let stack = if e.pad == u32::MAX {
+                        tally("not requested");
                         String::new()
                     } else if (e.pad as i32) < 0 {
-                        format!(" user_stack_errno={}", -(e.pad as i32))
+                        let errno = -(e.pad as i32);
+                        // EFAULT here is the ordinary outcome of a binary built
+                        // without frame pointers: there is no chain to walk.
+                        tally(&format!(
+                            "walk failed (errno {errno}{})",
+                            if errno == 14 {
+                                ", no frame pointer"
+                            } else {
+                                ""
+                            }
+                        ));
+                        format!(" user_stack_errno={errno}")
                     } else {
                         match self.stacks.get(&e.pad, 0) {
                             Ok(trace) => {
@@ -280,9 +299,13 @@ impl Probes {
                                     .collect::<Vec<_>>();
                                 frames.reverse();
                                 self.profile.add(&frames, 1);
+                                tally("collected");
                                 format!(" user_stack={}", frames.join(";"))
                             }
-                            Err(error) => format!(" user_stack_unavailable={error}"),
+                            Err(error) => {
+                                tally("stack map read failed");
+                                format!(" user_stack_unavailable={error}")
+                            }
                         }
                     };
                     (
@@ -363,6 +386,15 @@ impl Probes {
             let mut profile = self.profile.clone();
             profile.sort();
             t.profile = profile;
+        }
+        if !self.stack_tally.is_empty() {
+            t.details.insert(
+                "probe.stacks".into(),
+                self.stack_tally
+                    .iter()
+                    .map(|(reason, count)| (reason.clone(), count.to_string()))
+                    .collect(),
+            );
         }
         t.details.insert(
             "probe.capture_id".into(),

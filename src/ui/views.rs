@@ -3341,7 +3341,10 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
     // The graph is as tall as the stacks are deep, so a shallow profile does
     // not leave most of the panel blank and a deep one still gets the room.
     let deepest = flame_root(a).0.depth();
-    let graph = (deepest + 3).clamp(8, r.height.saturating_sub(10).max(8));
+    // An empty profile explains itself in prose, which needs more rows than a
+    // shallow graph would.
+    let wanted = if profile.is_empty() { 16 } else { deepest + 3 };
+    let graph = wanted.clamp(8, r.height.saturating_sub(10).max(8));
     let bands = vertical(
         r,
         &[
@@ -3395,19 +3398,61 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
         })
         .unwrap_or(usize::MAX);
     if profile.is_empty() {
-        note(
-            f,
-            area,
-            &[
-                "No stacks have been collected.",
-                "",
-                "A profile needs a capture that records them:",
-                ": probe syscalls pid=TID seconds=30 stack",
-                "",
-                "Stack depth depends on frame pointers in the traced binaries.",
-                "Stacks that end too shallow to be a call path are counted, not repaired.",
-            ],
-        );
+        // An empty profile has several causes and they need different
+        // answers, so the panel reports which one it is rather than repeating
+        // the same sentence.
+        let mut lines = vec!["No stacks have been collected.".to_string(), String::new()];
+        match t(a).capabilities.get("syscalls") {
+            Some(crate::domain::Quality::Available) => {
+                lines.push("A syscall capture is running.".into());
+                match t(a).details.get("probe.stacks") {
+                    Some(tally) => {
+                        lines.push("Stacks seen by this capture:".into());
+                        lines.extend(
+                            tally
+                                .iter()
+                                .map(|(reason, count)| format!("  {count} {reason}")),
+                        );
+                        lines.push(String::new());
+                        lines.push(
+                            "`not requested` means the capture was started without `stack`.".into(),
+                        );
+                        lines.push(
+                            "`no frame pointer` means the traced binary cannot be walked; \
+                             rebuild it with -fno-omit-frame-pointer to profile it."
+                                .into(),
+                        );
+                    }
+                    None => lines.push(
+                        "It has recorded no syscall yet. A thread that makes no syscalls \
+                         produces no stacks."
+                            .into(),
+                    ),
+                }
+            }
+            Some(
+                crate::domain::Quality::Denied(why)
+                | crate::domain::Quality::Error(why)
+                | crate::domain::Quality::Unsupported(why),
+            ) => {
+                lines.push("The last syscall capture did not run:".into());
+                lines.push(format!("  {why}"));
+                lines.push(String::new());
+                lines.push("Stack capture needs BPF privileges; restart as root.".into());
+            }
+            _ => {
+                lines.push("No capture has been started. Stacks come from one:".into());
+                lines.push("  : probe syscalls pid=TID seconds=30 stack".into());
+                lines.push(String::new());
+                lines.push(
+                    "pid= takes a thread id, not a process id, and `stack` is refused \
+                     without it."
+                        .into(),
+                );
+                lines.push("Opening this view collects nothing on its own.".into());
+            }
+        }
+        text(f, area, lines.into_iter().map(Line::raw).collect());
     } else {
         icicle(f, area, &cells.cells, selected);
     }

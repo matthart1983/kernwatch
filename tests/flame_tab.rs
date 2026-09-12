@@ -155,3 +155,65 @@ fn a_captures_stacks_survive_polls_that_fold_nothing() {
         "stacks from two captures are not one profile"
     );
 }
+
+#[test]
+fn an_empty_profile_says_which_reason_it_is() {
+    use kernwatch::domain::Quality;
+    let empty = |setup: &dyn Fn(&mut App)| {
+        let mut a = App::new(model::demo());
+        a.snapshot.demo = false;
+        a.snapshot.telemetry.profile = Default::default();
+        // The fixture ships a syscall capability; each case sets its own.
+        a.snapshot.telemetry.capabilities.remove("syscalls");
+        setup(&mut a);
+        a.switch(FLAME);
+        render(&a, 160, 40)
+    };
+
+    // Nothing started: say how to start one, and that opening the view is not it.
+    let screen = empty(&|_| {});
+    assert!(screen.contains("No capture has been started"));
+    assert!(screen.contains("thread id, not a process id"));
+
+    // Refused: repeat the refusal rather than the instructions.
+    let screen = empty(&|a| {
+        a.snapshot.telemetry.capabilities.insert(
+            "syscalls".into(),
+            Quality::Denied("operation not permitted".into()),
+        );
+    });
+    assert!(screen.contains("did not run"));
+    assert!(screen.contains("operation not permitted"));
+    assert!(screen.contains("restart as root"));
+
+    // Running but nothing recorded yet.
+    let screen = empty(&|a| {
+        a.snapshot
+            .telemetry
+            .capabilities
+            .insert("syscalls".into(), Quality::Available);
+    });
+    assert!(screen.contains("capture is running"));
+    assert!(screen.contains("makes no syscalls"));
+
+    // Running, and the walk is failing for a nameable reason.
+    let screen = empty(&|a| {
+        a.snapshot
+            .telemetry
+            .capabilities
+            .insert("syscalls".into(), Quality::Available);
+        a.snapshot.telemetry.details.insert(
+            "probe.stacks".into(),
+            vec![(
+                "walk failed (errno 14, no frame pointer)".into(),
+                "812".into(),
+            )],
+        );
+    });
+    assert!(screen.contains("812"));
+    assert!(screen.contains("no frame pointer"));
+    assert!(
+        screen.contains("fno-omit-frame-pointer"),
+        "a reader who cannot walk a binary should be told what would fix it"
+    );
+}
