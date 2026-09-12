@@ -35,7 +35,7 @@ impl Drop for Guard {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("kernwatch — Linux kernel observability\n\nkernwatch [--demo | --replay FILE] [--view NAME] [--at MS] [--snapshot | --render WIDTHxHEIGHT] [--trace]\n\nLive mode reads procfs/sysfs. --demo uses a synthetic incident. --demo-tour runs a guided synthetic tour; any key takes control.\n--trace starts a bounded 30-second BPF capture (requires kernel permissions).\n--replay reads recorded frames without sampling the host; --at selects a recorded time.\n--snapshot prints JSON. --render prints a terminal frame.\nViews: dense overview tasks scheduler memory block syscalls irq cgroups modules ebpf dmesg diagnose\nKeys: Tab focus, [ ] views, Enter drill, Esc back, / filter, f freeze, r record, e export, : commands, ? help, q quit");
+        println!("kernwatch — Linux kernel observability\n\nkernwatch [--demo | --replay FILE] [--view NAME] [--at MS] [--snapshot | --render WIDTHxHEIGHT] [--trace]\n\nLive mode reads procfs/sysfs. --demo uses a synthetic incident. --demo-tour runs a guided synthetic tour; any key takes control.\n--trace starts a bounded 30-second BPF capture (requires kernel permissions).\n--replay reads recorded frames without sampling the host; --at selects a recorded time.\n--snapshot prints JSON. --render prints a terminal frame.\nViews: dense overview tasks scheduler memory block syscalls irq cgroups modules ebpf dmesg diagnose flame\nKeys: Tab focus, [ ] views, Enter drill, Esc back, / filter, f freeze, r record, e export, : commands, ? help, q quit");
         return Ok(());
     }
     let mut demo = false;
