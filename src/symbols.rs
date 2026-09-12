@@ -234,6 +234,7 @@ pub struct Symbols {
     maps: BTreeMap<u32, Vec<Mapping>>,
     images: BTreeMap<String, Option<Image>>,
     image_versions: BTreeMap<String, ImageVersion>,
+    checked_images: std::collections::BTreeSet<String>,
 }
 impl Symbols {
     /// Read kernel symbols from the host. Absent or restricted symbols leave
@@ -270,19 +271,21 @@ impl Symbols {
             .clone();
         use std::os::unix::fs::MetadataExt;
         let file = format!("/proc/{pid}/root{}", mapping.path);
-        let stat = std::fs::metadata(&file).ok()?;
-        let version = (
-            stat.dev(),
-            stat.ino(),
-            stat.len(),
-            stat.mtime(),
-            stat.mtime_nsec(),
-            stat.ctime(),
-            stat.ctime_nsec(),
-        );
-        if self.image_versions.get(&mapping.path) != Some(&version) {
-            self.images.remove(&mapping.path);
-            self.image_versions.insert(mapping.path.clone(), version);
+        if self.checked_images.insert(mapping.path.clone()) {
+            let stat = std::fs::metadata(&file).ok()?;
+            let version = (
+                stat.dev(),
+                stat.ino(),
+                stat.len(),
+                stat.mtime(),
+                stat.mtime_nsec(),
+                stat.ctime(),
+                stat.ctime_nsec(),
+            );
+            if self.image_versions.get(&mapping.path) != Some(&version) {
+                self.images.remove(&mapping.path);
+                self.image_versions.insert(mapping.path.clone(), version);
+            }
         }
         let image = self
             .images
@@ -348,6 +351,7 @@ impl Symbols {
     /// Forget a process whose identity may have been reused.
     pub fn forget(&mut self, pid: u32) {
         self.maps.remove(&pid);
+        self.checked_images.clear();
     }
     /// Render one frame: a resolved name, or the address it stays as.
     pub fn frame(&mut self, pid: u32, address: u64, kernel: bool) -> String {

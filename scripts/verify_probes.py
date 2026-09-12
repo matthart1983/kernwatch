@@ -24,7 +24,7 @@ with tempfile.TemporaryDirectory(prefix="kernwatch-probes-") as directory:
             raise SystemExit(f"Stale probe: {name}; run probes/build.sh with the pinned toolchain")
 manifest = {
     "compiler": version,
-    "source_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+    "source_revision": subprocess.check_output(["git", "-c", f"safe.directory={ROOT}", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
     "source_sha256": hashlib.sha256((ROOT / "probes/kernwatch.bpf.c").read_bytes()).hexdigest(),
     "objects": {name: hashlib.sha256((ROOT / "probes" / name).read_bytes()).hexdigest() for name in objects},
 }

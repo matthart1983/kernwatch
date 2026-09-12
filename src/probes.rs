@@ -367,6 +367,9 @@ impl Probes {
             self.processed = self.profile.quality.attempted;
             return Ok(());
         }
+        if self.mode == "syscalls" && self.target_pid != 0 {
+            self.symbols.forget(self.target_pid);
+        }
         let lost = self.losses.get(&0, 0).map_err(err)?.iter().sum::<u64>();
         if lost > self.last_loss {
             self.correlator.loss(lost - self.last_loss);
