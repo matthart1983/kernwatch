@@ -1,8 +1,40 @@
 # Review the kernwatch demo
 
-kernwatch has two previews. The **live recording** in the README shows the release
-binary reading the real host. The **guided demo** below uses a synthetic incident
-and runs without host probes.
+kernwatch has three previews. The README leads with **real CPU profiling in a
+disposable Linux VM**, followed by a collapsible **live-host overview**. The
+**guided demo** below uses a synthetic incident and runs without host probes.
+
+## Record the profiling preview
+
+```sh
+python3 scripts/profile_demo.py
+```
+
+This builds the release binary and a frame-pointer-enabled Rust workload, boots
+an isolated two-CPU x86-64 QEMU guest, and records the real terminal with vhs.
+It requires `cc`, `qemu-system-x86_64`, `vhs`, FFmpeg, and a BTF-enabled Linux
+kernel in `/boot`. Set `KERNWATCH_DEMO_KERNEL` to select another kernel.
+The VM has no network, host filesystem mounts, or disk image and needs no sudo.
+
+The sequence opens **F**, filters for `profile-demo`, captures both threads,
+stops with **x**, retains a baseline with **B**, and exports it with **e**.
+The workload detects that export inside the VM and changes from cache-heavy to
+parse-heavy work. A second capture followed by **D** shows the change in sample
+shares. Filtering for `parse_headers` demonstrates finding a demangled frame.
+No stack samples or comparison values are manufactured.
+
+The script verifies two nonempty CPU captures, demangled symbols, an exported
+comparison, and changes exceeding 20 percentage points in the expected
+directions. Evidence stays in `/tmp/kernwatch-profile-demo` by default; set
+`KERNWATCH_DEMO_WORK` to choose another scratch directory. Only the reviewed GIF
+and screenshots belong in the repository, not the raw capture reports.
+
+Outputs are `screenshots/demo/kernwatch-profiling.gif`, a matching local MP4,
+`profiling-capture.png`, and `profiling-comparison.png`. Review the recording
+before publishing it. This is a controlled feature demonstration, not an
+overhead benchmark; different capture lengths and stack failures remain visible.
+
+![A real baseline comparison in the recording VM](../screenshots/demo/profiling-comparison.png)
 
 ## Record the live preview
 

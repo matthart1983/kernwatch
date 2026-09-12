@@ -4,9 +4,20 @@
 
 kernwatch is a Rust + Ratatui monitor for investigating CPU contention, task scheduling, memory pressure, block I/O, interrupts, cgroups, kernel modules, and eBPF activity. Fourteen connected views bring live counters, bounded tracing, timelines, stack profiles, and incident evidence into one keyboard-driven interface.
 
-![kernwatch monitoring a live host: Dense, Tasks, Scheduler, Memory, Block, IRQ, Cgroups, eBPF, Dmesg, and Diagnose](screenshots/demo/kernwatch-live.gif)
+![Real CPU profiling: choose a process, capture stacks, save a baseline, and compare a changed workload](screenshots/demo/kernwatch-profiling.gif)
 
-*Recorded against a live host under a generated workload — real counters, real task list, real kernel log. The synthetic [guided tour](docs/DEMO.md) is a separate mode. Live mode does not substitute demo values for missing measurements.*
+*Recorded from the release binary in a disposable two-CPU Linux VM. These are real CPU samples from a bounded workload: cache-heavy work first, then parse-heavy work. The comparison shows the change in sample shares; VM timings are not a performance benchmark. The synthetic [guided tour](docs/DEMO.md) is a separate mode.*
+
+Press **F**, select a process and press **Enter** to capture CPU stacks. **x** stops and keeps the capture, **B** retains a baseline, and **D** compares it with the next capture. Rust/C++ names are demangled; capture quality and stack-walk failures stay visible. **e** exports the profiles and folded stacks. See the [profiling guide](docs/FLAME_GRAPHS.md) for scope, diagnostics and commands.
+
+<details>
+<summary>Watch the broader live-host overview</summary>
+
+![Live host overview: tasks, scheduling, memory, block I/O, IRQs, cgroups and diagnosis](screenshots/demo/kernwatch-live.gif)
+
+This separate recording shows real host counters under a generated workload. It predates the CPU profiling preview above.
+
+</details>
 
 [Demo](#demo) · [Quick start](#quick-start) · [Views](#views) · [Controls](#controls) · [Tracing](#tracing) · [Development](#development) · [Limitations](#limitations)
 
