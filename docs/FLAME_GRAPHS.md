@@ -3,6 +3,9 @@
 Syscall-entry stack profiles, folded and drawn as a zoomable icicle on the
 Flame view (`F`).
 
+For the planned CPU sampler, kernel stacks, symbol improvements, and profile
+comparison, see the [profiling roadmap](PROFILING_PLAN.md).
+
 Stacks are taken when a thread enters a syscall, so this answers "what calls
 into the kernel, and from where". It is **not** a CPU profile: a thread burning
 CPU without making syscalls produces nothing, and one blocked in a single
@@ -59,25 +62,93 @@ Reconstructing those stacks needs DWARF `.eh_frame` unwinding — a project in
 itself, and what `perf --call-graph=dwarf` and parca do — or SFrame, which is
 new and needs a recent kernel. Neither is implemented.
 
-## Not implemented
+## Closing the gap with perf and flamegraph.pl
 
-Both need new BPF programs, so they need a BPF-capable Clang to rebuild
-`probes/kernwatch.bpf.o`.
+Where this is ahead: nothing is silently dropped, truncated stacks are counted
+and reported, no symbol is guessed across a gap, and capture and analysis are
+the same place. Where it is behind: the data itself. `perf` samples the CPU;
+this samples syscall entry. That is the gap, and it is mostly one program away.
 
-- **On-CPU sampling.** A `perf_event` program on `PERF_COUNT_SW_CPU_CLOCK` at
-  a fixed frequency, aggregating in-kernel into a hash map keyed by
-  `{user_stack_id, kernel_stack_id, tgid, comm}`. In-kernel aggregation matters
-  here: 99 Hz across 24 CPUs for 30 s is ~71k events at ~200 B each, about
-  14 MB pushed through the ring buffer to be summed. `aya` 0.13 already has the
-  program type, so no new dependency.
-- **Off-CPU profiles.** `bpf_get_stackid` at `sched_switch` switch-out,
-  weighted by the off-CPU duration the `offcpu` mode already computes
-  (`probes.rs`). The correlation is half-built; this is the differentiated one,
-  since `perf` does not give it up easily.
+### Phase 0 — build the probe object in CI
 
-Also open: **kernel stacks** (the `stack_id` flags are hardcoded to
-`BPF_F_USER_STACK`), and **demangling** — Rust and C++ symbols render mangled
-(`_RNvCs…`), because a demangler that guesses wrong would break the rule above.
+Nothing builds `probes/kernwatch.bpf.o`. It is checked in, built by hand, and
+neither `ci.yml` nor `release.yml` mentions clang or `probes/`, so an edit to
+`kernwatch.bpf.c` can ship against a stale object with no warning.
+
+A CI job that installs clang, runs `probes/build.sh`, and fails when the
+rebuilt object differs from the checked-in one closes that hazard and unblocks
+every item below for anyone without a local BPF-capable clang. Do this first
+whatever else is chosen.
+
+### Phase 1 — kernel stacks
+
+`kw_sys_enter` calls `stack_id(ctx, &stacks, 256)`; flag `256` is
+`BPF_F_USER_STACK`. A second call with flags `0` yields the kernel stack.
+Carry both ids on the event and append the kernel frames beneath the user
+frames.
+
+The userspace half already exists: `Symbols::kernel` parses `/proc/kallsyms`,
+detects `kptr_restrict`, and is covered by unit tests. This is a struct field
+and a second lookup, and it shows what the kernel does with the syscall —
+currently the missing half of every stack.
+
+### Phase 2 — CPU sampling
+
+A `SEC("perf_event")` program on `PERF_COUNT_SW_CPU_CLOCK` at 49 Hz, capturing
+both stack ids.
+
+Aggregate **in the kernel**: a hash map keyed by `{user_id, kernel_id, tgid}`
+counting samples, drained at the end. 99 Hz across 24 CPUs for 30 s is ~71k
+events at ~200 B through the ring buffer — about 14 MB — to produce numbers
+that are only going to be summed. `bcc`'s `profile` aggregates in-kernel for
+the same reason.
+
+`aya`'s `PerfEvent::attach` supplies the scope directly, so no BPF-side filter
+is needed:
+
+- `PerfEventScope::OneProcessAnyCpu { pid }` with `inherit: true` — a whole
+  process and the children it spawns
+- `PerfEventScope::AllProcessesOneCpu { cpu }`, attached per CPU — system wide
+
+One program therefore delivers a real CPU profile, process-wide capture, and
+system-wide profiling together. It is the highest-value item by a distance: it
+changes what the tool measures rather than how it presents it. The C can stay
+in the existing minimal-header style, since `bpf_perf_event_data` is only
+passed through to the helper and can remain opaque.
+
+### Phase 3 — readable symbols
+
+Rust and C++ frames render mangled. `rustc-demangle` is small and has no
+dependencies; Itanium C++ demangling is a larger commitment and `cpp_demangle`
+is a real dependency to weigh against a six-crate manifest.
+
+Whichever is used, keep the existing rule: demangle only when the mangled form
+parses, and otherwise leave the symbol exactly as captured.
+
+### Phase 4 — differential profiles
+
+Entirely userspace. Keep a baseline profile, compute per-frame deltas, and
+render them diverging — grew against shrank. Regression work is where profiles
+earn their keep, and `stacks.folded` is already the interchange format to diff
+a saved run against.
+
+Worth taking before DWARF: more value, far less risk.
+
+### Phase 5 — DWARF unwinding, deferred
+
+Walking stacks without frame pointers means capturing register state and a
+stack copy in BPF, then evaluating `.eh_frame` CFI in userspace — what
+`perf --call-graph=dwarf` and parca do, and a project in its own right.
+
+The present behaviour is the honest fallback: detect the truncation and report
+the share. Revisit only if profiling frame-pointer-less binaries becomes the
+main use.
+
+### Order
+
+0 → 1 → 2 closes most of the gap, then 4, then 3. After phase 2 the honest
+summary changes from a better lens on a narrower picture to a better lens on
+the same one.
 
 ## Collecting a profile
 
