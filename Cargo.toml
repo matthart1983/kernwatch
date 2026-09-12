@@ -7,6 +7,9 @@ repository = "https://github.com/matthart1983/kernwatch"
 readme = "README.md"
 rust-version = "1.98"
 license = "MIT"
+categories = ["command-line-utilities", "os::linux-apis"]
+keywords = ["linux", "ebpf", "observability", "tui", "kernel"]
+exclude = ["screenshots/", "docs/reference/"]
 
 [dependencies]
 ratatui = "0.27"
