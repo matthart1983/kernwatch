@@ -254,6 +254,12 @@ Screenshot rendering also needs Pillow and either Adwaita Mono or DejaVu Sans Mo
 
 ## Limitations
 
+The [v0.4.0 performance review](docs/PERFORMANCE_REVIEW.md) includes host CPU/RSS
+measurements and profile scaling benchmarks. Large differential profiles still
+need work: comparison redraws and repeated profile copies are expensive, and
+timeline memory accounting omits symbol metadata. The small sampler benchmark
+does not measure total application overhead.
+
 The pre-rename baseline passed tracing tests on Linux x86-64 kernels **6.19.10** and **7.1.13** in disposable VMs. The renamed build has not repeated those privileged tests. The ARM64 CO-RE probe and syscall decoder use the ARM64 register ABI; privileged ARM64 probe attachment has not yet been validated. Compatibility with other kernels, drivers and security policies needs separate validation.
 
 Remaining work includes user-stack symbolization, allocation and module-loader attribution, a supported interactive tracefs fallback, BPF map occupancy/FD-holder attribution, and cross-suspend alignment of historical log timestamps. CPU/runtime counters cannot reconstruct missing historical events or establish causality on their own.
