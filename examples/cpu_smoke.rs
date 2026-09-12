@@ -133,8 +133,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .keys()
         .all(|k| k.starts_with(&format!("{pid}:{before_tid}:"))));
     println!("THREAD_SCOPE_OK");
+    // Force sustained kernel execution; incidental interrupts in a user-only
+    // workload are not a reliable kernel-stack acceptance test.
+    let kernel_stop = Arc::new(AtomicBool::new(false));
+    let kernel_done = kernel_stop.clone();
+    let kernel_worker = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut zero = std::fs::File::open("/dev/zero").unwrap();
+        let mut buffer = vec![0u8; 4 * 1024 * 1024];
+        while !kernel_done.load(Ordering::Relaxed) {
+            zero.read_exact(&mut buffer).unwrap();
+            std::hint::black_box(&buffer);
+        }
+    });
     let mut system = Probes::start("cpu seconds=2")?;
     collect(&mut system, 2)?;
+    kernel_stop.store(true, Ordering::Relaxed);
+    kernel_worker.join().unwrap();
     assert!(system
         .profile
         .tasks
