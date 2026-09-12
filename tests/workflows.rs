@@ -127,7 +127,8 @@ fn missing_time_is_a_gap_instead_of_stretched_history() {
                 at_ms: 10000,
                 value: Some(2.),
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
     let window = series.window(10000, 10);

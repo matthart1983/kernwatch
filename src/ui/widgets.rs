@@ -705,7 +705,8 @@ mod redraw_tests {
                     at_ms: 2010,
                     value: Some(3.),
                 },
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
         assert_eq!(s.window(2100, 2), vec![Some(2.), None, Some(3.)]);
@@ -755,7 +756,8 @@ mod redraw_tests {
             samples: vec![Sample {
                 at_ms: 1000,
                 value: Some(40.),
-            }],
+            }]
+            .into(),
             ..Default::default()
         };
         let render = |warn| {
@@ -790,7 +792,8 @@ mod fixed_sample_width_tests {
                     at_ms: 103000,
                     value: Some(10.),
                 },
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
         for width in [5, 12, 61, 120, 240] {
@@ -857,7 +860,8 @@ mod insufficient_history_tests {
                     at_ms: 2010,
                     value: Some(8.),
                 },
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
         for width in [12, 80, 240] {
@@ -883,7 +887,8 @@ mod insufficient_history_tests {
                     at_ms: 2010,
                     value: Some(8.),
                 },
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
         let mut cpu = Terminal::new(TestBackend::new(97, 6)).unwrap();

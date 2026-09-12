@@ -31,5 +31,7 @@ jobs:
         run: cargo build --locked --release
       - name: Terminal smoke test
         run: python3 scripts/pty_smoke.py
+      - name: Dirty rendering and input latency
+        run: python3 scripts/observer_smoke.py
       - name: Guided demo smoke test
         run: python3 scripts/demo_smoke.py

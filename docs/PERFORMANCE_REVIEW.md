@@ -1,5 +1,10 @@
 # Performance review — v0.4.0
 
+Follow-up: the [CPU reduction analysis and plan](CPU_REDUCTION_PLAN.md) adds a
+native self-profile, an eleven-minute instrumented run past history capacity,
+and a helper-launch experiment. It identifies the growing background cost and
+sets out the implementation sequence.
+
 Reviewed 2026-09-12 against release commit
 `5d44c0b864551a59c6e20c538499c7b8092ab0b9`. The subsequent demo commit changes
 documentation, recording tools and a workload example, not application code.

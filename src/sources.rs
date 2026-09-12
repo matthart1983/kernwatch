@@ -1,6 +1,26 @@
 //! Independent bounded topology workers. A slow smaps or device read cannot stop CPU/task updates.
 use crate::{domain::*, inventory::Inventory};
+use std::collections::BTreeMap;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+/// Only identities cross from the UI to slow collectors. No host records or
+/// histories are cloned to express interest. Replay/frozen views clear demand.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Demand {
+    pub tasks: std::collections::BTreeSet<(u32, u64)>,
+    pub module: Option<String>,
+    pub cgroup: Option<String>,
+    pub device: Option<String>,
+}
+fn demand_slot() -> &'static std::sync::Mutex<Demand> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Demand>> = std::sync::OnceLock::new();
+    SLOT.get_or_init(Default::default)
+}
+pub fn set_demand(demand: Demand) {
+    *demand_slot().lock().unwrap() = demand;
+}
+pub fn demand() -> Demand {
+    demand_slot().lock().unwrap().clone()
+}
 struct Source {
     name: &'static str,
     send: SyncSender<Telemetry>,
@@ -11,13 +31,15 @@ struct Source {
     /// the task-carrying sources means cloning thousands of tasks per second
     /// for nothing.
     pending: bool,
+    next_due: u64,
+    demand: Demand,
 }
 impl Source {
     fn new(name: &'static str, collect: fn(&mut Inventory, &mut Telemetry)) -> Self {
         let (send, requests) = sync_channel::<Telemetry>(1);
         let (results, receive) = sync_channel(1);
         let _ = std::thread::Builder::new()
-            .name("topology".into())
+            .name(format!("kw-{name}"))
             .spawn(move || {
                 let mut inventory = Inventory::default();
                 let mut history = std::collections::BTreeMap::new();
@@ -25,7 +47,10 @@ impl Source {
                     let start = std::time::Instant::now();
                     t.at_ms = crate::enrich::monotonic_ms();
                     t.series = std::mem::take(&mut history);
-                    collect(&mut inventory, &mut t);
+                    {
+                        let _cost = crate::cpu_cost::scope(name);
+                        collect(&mut inventory, &mut t);
+                    }
                     t.details.insert(
                         format!("source:{name}"),
                         vec![
@@ -46,6 +71,8 @@ impl Source {
             receive,
             latest: None,
             pending: false,
+            next_due: 0,
+            demand: Demand::default(),
         }
     }
     fn update(&mut self, t: &mut Telemetry) {
@@ -53,7 +80,26 @@ impl Source {
             self.latest = Some(result);
             self.pending = false;
         }
-        if self.pending {
+        let demand = demand();
+        let changed = match self.name {
+            "task_metadata" => demand.tasks != self.demand.tasks,
+            "module_metadata" => demand.module != self.demand.module,
+            "systemd" => demand.cgroup != self.demand.cgroup,
+            "storage_health" => demand.device != self.demand.device,
+            _ => false,
+        };
+        if changed {
+            self.next_due = 0;
+            self.demand = demand.clone();
+        }
+        let wanted = match self.name {
+            "task_metadata" => !demand.tasks.is_empty(),
+            "module_metadata" => demand.module.is_some(),
+            "systemd" => demand.cgroup.is_some(),
+            "storage_health" => demand.device.is_some(),
+            _ => true,
+        };
+        if self.pending || t.at_ms < self.next_due || !wanted {
             self.publish(t);
             return;
         }
@@ -62,42 +108,88 @@ impl Source {
                 t.tasks
                     .iter()
                     .filter(|t| {
-                        self.name == "task_metadata" || (t.rss_bytes > 0 && t.pid == t.tgid)
+                        if self.name == "task_metadata" {
+                            demand.tasks.contains(&(t.pid, t.start_ticks))
+                        } else {
+                            t.rss_bytes > 0 && t.pid == t.tgid
+                        }
                     })
                     .take(10000)
-                    .cloned()
+                    .map(|t| Task {
+                        pid: t.pid,
+                        tgid: t.tgid,
+                        start_ticks: t.start_ticks,
+                        rss_bytes: t.rss_bytes,
+                        ..Default::default()
+                    })
                     .collect()
             } else {
                 Vec::new()
             },
             modules: if self.name == "module_metadata" {
-                t.modules.clone()
+                t.modules
+                    .iter()
+                    .filter(|m| Some(&m.name) == demand.module.as_ref())
+                    .cloned()
+                    .collect()
             } else {
                 Vec::new()
             },
             cgroups: if self.name == "systemd" {
-                t.cgroups.clone()
+                t.cgroups
+                    .iter()
+                    .filter(|g| Some(&g.path) == demand.cgroup.as_ref())
+                    .map(|g| Cgroup {
+                        path: g.path.clone(),
+                        inode: g.inode,
+                        ..Default::default()
+                    })
+                    .collect()
             } else {
                 Vec::new()
             },
             devices: if self.name == "storage_health" {
-                t.devices.clone()
+                t.devices
+                    .iter()
+                    .filter(|d| Some(&d.name) == demand.device.as_ref())
+                    .map(|d| Device {
+                        name: d.name.clone(),
+                        major_minor: d.major_minor.clone(),
+                        partition: d.partition,
+                        ..Default::default()
+                    })
+                    .collect()
             } else {
                 Vec::new()
             },
             ..Default::default()
         };
         self.pending = self.send.try_send(request).is_ok();
+        if self.pending {
+            self.next_due = t.at_ms.saturating_add(self.interval());
+        }
         self.publish(t);
+    }
+
+    fn interval(&self) -> u64 {
+        match self.name {
+            "modules/pss" | "task_metadata" | "journal" => 5000,
+            "module_metadata" | "systemd" | "storage_health" => 30000,
+            _ => 1000,
+        }
+    }
+    fn stale_after(&self) -> u64 {
+        (self.interval() * 2).max(10000)
     }
 
     /// Merge the worker's most recent result into the snapshot.
     fn publish(&mut self, t: &mut Telemetry) {
+        let _cost = crate::cpu_cost::scope("source.publish");
         if let Some(source) = &self.latest {
             let age = t.at_ms.saturating_sub(source.at_ms);
             t.capabilities.insert(
                 self.name.into(),
-                if age < 10000 {
+                if age < self.stale_after() {
                     source
                         .capabilities
                         .get(self.name)
@@ -115,55 +207,73 @@ impl Source {
             ]
             .contains(&self.name)
             {
+                let old_tasks: BTreeMap<_, _> = source
+                    .tasks
+                    .iter()
+                    .map(|p| (p.pid, p.start_ticks))
+                    .collect();
+                let tasks: BTreeMap<_, _> =
+                    t.tasks.iter().map(|p| (p.pid, p.start_ticks)).collect();
+                let old_modules: BTreeMap<_, _> = source
+                    .modules
+                    .iter()
+                    .map(|m| {
+                        (
+                            m.name.as_str(),
+                            crate::enrichment::named(&m.fields, "sysfs identity"),
+                        )
+                    })
+                    .collect();
+                let modules: BTreeMap<_, _> = t
+                    .modules
+                    .iter()
+                    .map(|m| {
+                        (
+                            m.name.as_str(),
+                            crate::enrichment::named(&m.fields, "sysfs identity"),
+                        )
+                    })
+                    .collect();
+                let old_groups: BTreeMap<_, _> = source
+                    .cgroups
+                    .iter()
+                    .map(|g| (g.path.as_str(), g.inode))
+                    .collect();
+                let groups: BTreeMap<_, _> = t
+                    .cgroups
+                    .iter()
+                    .map(|g| (g.path.as_str(), g.inode))
+                    .collect();
+                let old_devices: BTreeMap<_, _> = source
+                    .devices
+                    .iter()
+                    .map(|d| (d.name.as_str(), d.major_minor.as_str()))
+                    .collect();
+                let devices: BTreeMap<_, _> = t
+                    .devices
+                    .iter()
+                    .map(|d| (d.name.as_str(), d.major_minor.as_str()))
+                    .collect();
                 for (key, fields) in &source.details {
                     let valid = if let Some(pid) = key
                         .strip_prefix("task:")
                         .and_then(|v| v.parse::<u32>().ok())
                     {
-                        source
-                            .tasks
-                            .iter()
-                            .find(|p| p.pid == pid)
-                            .is_some_and(|old| {
-                                t.tasks
-                                    .iter()
-                                    .any(|p| p.pid == pid && p.start_ticks == old.start_ticks)
-                            })
+                        old_tasks
+                            .get(&pid)
+                            .is_some_and(|old| tasks.get(&pid) == Some(old))
                     } else if let Some(name) = key.strip_prefix("module:") {
-                        source
-                            .modules
-                            .iter()
-                            .find(|m| m.name == name)
-                            .is_some_and(|old| {
-                                t.modules.iter().any(|m| {
-                                    m.name == name
-                                        && crate::enrichment::named(&m.fields, "sysfs identity")
-                                            == crate::enrichment::named(
-                                                &old.fields,
-                                                "sysfs identity",
-                                            )
-                                })
-                            })
+                        old_modules
+                            .get(name)
+                            .is_some_and(|old| modules.get(name) == Some(old))
                     } else if let Some(path) = key.strip_prefix("cgroup:") {
-                        source
-                            .cgroups
-                            .iter()
-                            .find(|g| g.path == path)
-                            .is_some_and(|old| {
-                                t.cgroups
-                                    .iter()
-                                    .any(|g| g.path == path && g.inode == old.inode)
-                            })
+                        old_groups
+                            .get(path)
+                            .is_some_and(|old| groups.get(path) == Some(old))
                     } else if let Some(name) = key.strip_prefix("device:") {
-                        source
-                            .devices
-                            .iter()
-                            .find(|d| d.name == name)
-                            .is_some_and(|old| {
-                                t.devices
-                                    .iter()
-                                    .any(|d| d.name == name && d.major_minor == old.major_minor)
-                            })
+                        old_devices
+                            .get(name)
+                            .is_some_and(|old| devices.get(name) == Some(old))
                     } else {
                         true
                     };
@@ -197,22 +307,20 @@ impl Source {
                 "cgroups" => t.cgroups = source.cgroups.clone(),
                 "modules/pss" => {
                     t.modules = source.modules.clone();
+                    let tasks: BTreeMap<_, _> = source
+                        .tasks
+                        .iter()
+                        .map(|p| ((p.pid, p.start_ticks), p))
+                        .collect();
                     for task in &mut t.tasks {
-                        task.pss_at_ms = source
-                            .tasks
-                            .iter()
-                            .find(|p| p.pid == task.pid && p.start_ticks == task.start_ticks)
-                            .and_then(|p| p.pss_at_ms);
-                        task.pss_bytes = source
-                            .tasks
-                            .iter()
-                            .find(|p| p.pid == task.pid && p.start_ticks == task.start_ticks)
-                            .and_then(|p| p.pss_bytes);
+                        let old = tasks.get(&(task.pid, task.start_ticks));
+                        task.pss_at_ms = old.and_then(|p| p.pss_at_ms);
+                        task.pss_bytes = old.and_then(|p| p.pss_bytes);
                     }
                 }
                 _ => {}
             }
-            if age >= 10000 {
+            if age >= self.stale_after() {
                 match self.name {
                     "devices" => {
                         for d in &mut t.devices {
@@ -239,6 +347,22 @@ impl Source {
             }
         } else {
             t.capabilities.insert(self.name.into(), Quality::Warming);
+            t.details
+                .entry(format!("source:{}", self.name))
+                .or_insert_with(|| {
+                    vec![(
+                        "acquisition".into(),
+                        if matches!(
+                            self.name,
+                            "module_metadata" | "systemd" | "storage_health" | "task_metadata"
+                        ) {
+                            "On demand: open the subject inspector to request metadata"
+                        } else {
+                            "Waiting for first observation"
+                        }
+                        .into(),
+                    )]
+                });
         }
     }
 }
@@ -264,6 +388,7 @@ impl Default for Topology {
 }
 impl Topology {
     pub fn sample(&mut self, t: &mut Telemetry) {
+        let _cost = crate::cpu_cost::scope("topology.merge");
         for source in &mut self.sources {
             source.update(t);
         }
@@ -296,11 +421,137 @@ mod tests {
             receive,
             latest: Some(old),
             pending: false,
+            next_due: 0,
+            demand: Demand::default(),
         };
-        source.update(&mut now);
+        source.publish(&mut now);
         assert!(now.details.is_empty());
         now.tasks[0].start_ticks -= 1;
-        source.update(&mut now);
+        source.publish(&mut now);
         assert_eq!(now.details.values().next().unwrap()[0].1, "42");
+    }
+}
+
+#[cfg(test)]
+mod scaling_tests {
+    use super::*;
+    fn source(name: &'static str, latest: Telemetry) -> Source {
+        let (send, _) = sync_channel(1);
+        let (_, receive) = sync_channel(1);
+        Source {
+            name,
+            send,
+            receive,
+            latest: Some(latest),
+            pending: false,
+            next_due: 0,
+            demand: Demand::default(),
+        }
+    }
+    #[test]
+    fn pss_merge_rejects_reuse_and_preserves_acquisition_time() {
+        let old = Telemetry {
+            at_ms: 1000,
+            tasks: vec![Task {
+                pid: 1,
+                start_ticks: 7,
+                pss_at_ms: Some(900),
+                pss_bytes: Some(42),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut now = old.clone();
+        now.tasks[0].start_ticks = 8;
+        let mut source = source("modules/pss", old);
+        source.publish(&mut now);
+        assert_eq!(now.tasks[0].pss_bytes, None);
+        now.tasks[0].start_ticks = 7;
+        source.publish(&mut now);
+        assert_eq!(
+            (now.tasks[0].pss_at_ms, now.tasks[0].pss_bytes),
+            (Some(900), Some(42))
+        );
+        now.at_ms = 11000;
+        source.publish(&mut now);
+        assert_eq!(now.tasks[0].pss_bytes, None);
+        assert_eq!(now.capabilities["modules/pss"], Quality::Stale);
+    }
+    #[test]
+    fn object_indexes_reject_replaced_cgroups_modules_and_devices() {
+        for name in ["systemd", "module_metadata", "storage_health"] {
+            let mut old = Telemetry {
+                at_ms: 1000,
+                ..Default::default()
+            };
+            old.cgroups.push(Cgroup {
+                path: "/unit".into(),
+                inode: 1,
+                ..Default::default()
+            });
+            old.modules.push(Module {
+                name: "module".into(),
+                fields: vec![("sysfs identity".into(), "1".into())],
+                ..Default::default()
+            });
+            old.devices.push(Device {
+                name: "disk".into(),
+                major_minor: "1:1".into(),
+                ..Default::default()
+            });
+            let key = match name {
+                "systemd" => "cgroup:/unit",
+                "module_metadata" => "module:module",
+                _ => "device:disk",
+            };
+            old.details
+                .insert(key.into(), vec![("metadata".into(), "old".into())]);
+            let mut now = old.clone();
+            now.details.clear();
+            now.cgroups[0].inode = 2;
+            now.modules[0].fields[0].1 = "2".into();
+            now.devices[0].major_minor = "2:2".into();
+            source(name, old).publish(&mut now);
+            assert!(!now.details.contains_key(key));
+        }
+    }
+    #[test]
+    #[ignore = "explicit release-mode scaling benchmark; no host acquisition"]
+    fn metadata_join_scaling() {
+        for count in [100, 1000, 3000, 10000] {
+            let old = Telemetry {
+                at_ms: 1000,
+                tasks: (0..count)
+                    .map(|pid| Task {
+                        pid,
+                        start_ticks: pid as u64 + 10,
+                        pss_bytes: Some(42),
+                        pss_at_ms: Some(900),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            let mut source = source("modules/pss", old.clone());
+            let mut times = Vec::new();
+            for _ in 0..11 {
+                let mut now = old.clone();
+                for task in now.tasks.iter_mut().step_by(10) {
+                    task.start_ticks += 1;
+                }
+                let start = std::time::Instant::now();
+                source.publish(&mut now);
+                times.push(start.elapsed().as_secs_f64() * 1000.);
+                assert_eq!(
+                    now.tasks.iter().filter(|t| t.pss_bytes == Some(42)).count(),
+                    count as usize * 9 / 10
+                );
+            }
+            times.sort_by(f64::total_cmp);
+            println!(
+                "METADATA_JOIN tasks={count} median_ms={:.3} p95_ms={:.3}",
+                times[5], times[10]
+            );
+        }
     }
 }

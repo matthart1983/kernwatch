@@ -113,7 +113,32 @@ pub struct FrameInfo {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Profile {
+#[serde(transparent)]
+pub struct Shared<T>(std::sync::Arc<T>);
+impl<T> Shared<T> {
+    pub fn same_version(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl<T> From<T> for Shared<T> {
+    fn from(value: T) -> Self {
+        Self(std::sync::Arc::new(value))
+    }
+}
+impl<T> std::ops::Deref for Shared<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+impl<T: Clone> std::ops::DerefMut for Shared<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        std::sync::Arc::make_mut(&mut self.0)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProfileData {
     #[serde(default)]
     pub tasks: std::collections::BTreeMap<String, u64>,
     #[serde(default)]
@@ -121,8 +146,8 @@ pub struct Profile {
     #[serde(default)]
     pub quality: Quality,
     #[serde(default)]
-    pub frames: std::collections::BTreeMap<String, FrameInfo>,
-    pub root: Node,
+    pub frames: Shared<std::collections::BTreeMap<String, FrameInfo>>,
+    pub root: Shared<Node>,
     /// What produced these stacks, named the way the capture named it.
     pub source: String,
     /// Samples whose stack ended at or below `SHALLOW` frames.
@@ -130,16 +155,38 @@ pub struct Profile {
     /// Samples whose stack still carries at least one unresolved address.
     pub unresolved: u64,
 }
+/// Copy-on-write capture. Retained frames and render caches share an immutable
+/// version; direct field mutation also detaches, so cached identities stay valid.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Profile(std::sync::Arc<ProfileData>);
+impl std::ops::Deref for Profile {
+    type Target = ProfileData;
+    fn deref(&self) -> &ProfileData {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for Profile {
+    fn deref_mut(&mut self) -> &mut ProfileData {
+        std::sync::Arc::make_mut(&mut self.0)
+    }
+}
+impl Profile {
+    pub fn same_version(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 impl Profile {
     pub fn new(source: &str) -> Self {
-        Self {
+        Self(std::sync::Arc::new(ProfileData {
             root: Node {
                 name: "all".into(),
                 ..Default::default()
-            },
+            }
+            .into(),
             source: source.to_owned(),
             ..Default::default()
-        }
+        }))
     }
     /// Fold one observed stack, innermost frame last.
     pub fn add(&mut self, frames: &[String], weight: u64) {
@@ -155,7 +202,7 @@ impl Profile {
             self.unresolved += weight;
         }
         self.root.samples += weight;
-        let mut node = &mut self.root;
+        let mut node: &mut Node = &mut self.root;
         for frame in frames {
             node = node.child(frame);
             node.samples += weight;
@@ -387,25 +434,82 @@ pub struct Comparison {
     pub baseline: Metadata,
     pub current: Metadata,
 }
+/// Prepared once per immutable profile pair and mode. Rendering performs
+/// indexed delta lookup and formats only the visible list rows.
+pub struct PreparedComparison {
+    pub current: Profile,
+    pub baseline: Profile,
+    pub comparison: Comparison,
+    pub union: Profile,
+    pub order: Vec<usize>,
+}
+impl PreparedComparison {
+    pub fn new(
+        current: &Profile,
+        baseline: &Profile,
+        mode: ComparisonMode,
+    ) -> Result<Self, String> {
+        let comparison = current.compare(baseline, mode)?;
+        let mut order: Vec<_> = (0..comparison.changes.len()).collect();
+        order.sort_unstable_by(|&x, &y| {
+            let x = &comparison.changes[x];
+            let y = &comparison.changes[y];
+            y.delta
+                .abs()
+                .total_cmp(&x.delta.abs())
+                .then_with(|| x.path.cmp(&y.path))
+        });
+        Ok(Self {
+            current: current.clone(),
+            baseline: baseline.clone(),
+            comparison,
+            union: current.comparison_union(baseline),
+            order,
+        })
+    }
+}
 impl Profile {
     /// Layout mass is the maximum baseline/current count at each terminal
     /// path. This preserves removed paths without claiming widths are deltas.
     pub fn comparison_union(&self, baseline: &Profile) -> Profile {
         fn union(before: Option<&Node>, after: Option<&Node>, name: String) -> Node {
-            let mut names = std::collections::BTreeSet::new();
-            for node in [before, after].into_iter().flatten() {
-                names.extend(node.children.iter().map(|c| c.name.clone()));
+            if let Some((b, a)) = before.zip(after).filter(|(b, a)| b == a) {
+                let _ = b;
+                let mut node = a.clone();
+                node.name = name;
+                node.sort();
+                return node;
             }
-            let mut children: Vec<Node> = names
-                .into_iter()
-                .map(|name| {
-                    union(
-                        before.and_then(|n| n.children.iter().find(|c| c.name == name)),
-                        after.and_then(|n| n.children.iter().find(|c| c.name == name)),
-                        name,
-                    )
-                })
-                .collect();
+            let b = before.map_or(&[][..], |n| n.children.as_slice());
+            let a = after.map_or(&[][..], |n| n.children.as_slice());
+            let mut children = if b.len() <= 1
+                && a.len() <= 1
+                && (b.is_empty() || a.is_empty() || b[0].name == a[0].name)
+            {
+                if let Some(child) = a.first().or(b.first()) {
+                    vec![union(b.first(), a.first(), child.name.clone())]
+                } else {
+                    Vec::new()
+                }
+            } else {
+                let mut pairs =
+                    std::collections::BTreeMap::<&str, (Option<&Node>, Option<&Node>)>::new();
+                if let Some(n) = before {
+                    for c in &n.children {
+                        pairs.entry(&c.name).or_default().0 = Some(c);
+                    }
+                }
+                if let Some(n) = after {
+                    for c in &n.children {
+                        pairs.entry(&c.name).or_default().1 = Some(c);
+                    }
+                }
+                let children: Vec<Node> = pairs
+                    .into_iter()
+                    .map(|(name, (before, after))| union(before, after, name.to_owned()))
+                    .collect();
+                children
+            };
             children.sort_by(|x, y| y.samples.cmp(&x.samples).then_with(|| x.name.cmp(&y.name)));
             let own = before.map_or(0, Node::own).max(after.map_or(0, Node::own));
             Node {
@@ -414,10 +518,22 @@ impl Profile {
                 children,
             }
         }
-        let mut profile = self.clone();
-        profile.frames.extend(baseline.frames.clone());
-        profile.root = union(Some(&baseline.root), Some(&self.root), "comparison".into());
-        profile
+        let mut frames = self.frames.clone();
+        if !frames.same_version(&baseline.frames) {
+            for (key, value) in baseline.frames.iter() {
+                if !frames.contains_key(key) {
+                    frames.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        Profile(std::sync::Arc::new(ProfileData {
+            root: union(Some(&baseline.root), Some(&self.root), "comparison".into()).into(),
+            frames,
+            metadata: self.metadata.clone(),
+            quality: self.quality.clone(),
+            source: self.source.clone(),
+            ..Default::default()
+        }))
     }
     pub fn validate(&self) -> Result<(), String> {
         fn node(n: &Node) -> Result<(), String> {
@@ -454,42 +570,82 @@ impl Profile {
         if self.is_empty() || baseline.is_empty() {
             return Err("Both profiles need usable samples".into());
         }
-        fn walk(
-            node: &Node,
+        fn visit(
+            before: Option<&Node>,
+            after: Option<&Node>,
             path: &mut Vec<String>,
-            counts: &mut std::collections::BTreeMap<Vec<String>, (u64, u64)>,
-            current: bool,
+            out: &mut Vec<Change>,
+            totals: (u64, u64),
+            mode: ComparisonMode,
         ) {
-            for child in &node.children {
-                path.push(child.name.clone());
-                let entry = counts.entry(path.clone()).or_default();
-                if current {
-                    entry.1 = child.samples;
-                } else {
-                    entry.0 = child.samples;
-                }
-                walk(child, path, counts, current);
-                path.pop();
-            }
-        }
-        let mut counts = std::collections::BTreeMap::new();
-        walk(&baseline.root, &mut Vec::new(), &mut counts, false);
-        walk(&self.root, &mut Vec::new(), &mut counts, true);
-        let changes = counts
-            .into_iter()
-            .map(|(path, (before, after))| Change {
-                path,
-                before,
-                after,
+            let name = after.or(before).unwrap().name.clone();
+            path.push(name);
+            let b = before.map_or(0, |n| n.samples);
+            let a = after.map_or(0, |n| n.samples);
+            out.push(Change {
+                path: path.clone(),
+                before: b,
+                after: a,
                 delta: match mode {
-                    ComparisonMode::Counts => (after as i128 - before as i128) as f64,
+                    ComparisonMode::Counts => (a as i128 - b as i128) as f64,
                     ComparisonMode::Share => {
-                        100. * (after as f64 / self.root.samples as f64
-                            - before as f64 / baseline.root.samples as f64)
+                        100. * (a as f64 / totals.1 as f64 - b as f64 / totals.0 as f64)
                     }
                 },
-            })
-            .collect();
+            });
+            walk(before, after, path, out, totals, mode);
+            path.pop();
+        }
+        fn walk(
+            before: Option<&Node>,
+            after: Option<&Node>,
+            path: &mut Vec<String>,
+            out: &mut Vec<Change>,
+            totals: (u64, u64),
+            mode: ComparisonMode,
+        ) {
+            let b = before.map_or(&[][..], |n| n.children.as_slice());
+            let a = after.map_or(&[][..], |n| n.children.as_slice());
+            // Most frames are chains. Avoid an allocated join table for them.
+            if b.len() <= 1 && a.len() <= 1 {
+                match (b.first(), a.first()) {
+                    (None, None) => return,
+                    (Some(b), Some(a)) if b.name == a.name => {
+                        visit(Some(b), Some(a), path, out, totals, mode);
+                        return;
+                    }
+                    (b, None) => {
+                        visit(b, None, path, out, totals, mode);
+                        return;
+                    }
+                    (None, a) => {
+                        visit(None, a, path, out, totals, mode);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            let mut pairs =
+                std::collections::BTreeMap::<&str, (Option<&Node>, Option<&Node>)>::new();
+            for c in b {
+                pairs.entry(&c.name).or_default().0 = Some(c);
+            }
+            for c in a {
+                pairs.entry(&c.name).or_default().1 = Some(c);
+            }
+            for (b, a) in pairs.into_values() {
+                visit(b, a, path, out, totals, mode);
+            }
+        }
+        let mut changes = Vec::new();
+        walk(
+            Some(&baseline.root),
+            Some(&self.root),
+            &mut Vec::new(),
+            &mut changes,
+            (baseline.root.samples, self.root.samples),
+            mode,
+        );
         let mut warnings = Vec::new();
         if self.metadata.scope != baseline.metadata.scope {
             warnings.push("Scopes differ".into());

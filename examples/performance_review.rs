@@ -77,6 +77,9 @@ fn main() {
         terminal.draw(|f| ui::draw(f, &app)).unwrap();
     });
     app.flame_compare = Some(flame::ComparisonMode::Share);
+    let first = Instant::now();
+    terminal.draw(|f| ui::draw(f, &app)).unwrap();
+    let initial_comparison_ms = first.elapsed().as_secs_f64() * 1000.;
     let comparison = measure(|| {
         terminal.draw(|f| ui::draw(f, &app)).unwrap();
     });
@@ -107,7 +110,7 @@ fn main() {
         "{}",
         json!({"shape":shape,"stacks":count,"symbols":current.frames.len(),
         "build_ms":build_ms,"render":single,"render_comparison":comparison,
-        "comparison_union":union,"clone_sort_publish":clone_sort,
+        "initial_comparison_ms":initial_comparison_ms,"comparison_union":union,"clone_sort_publish":clone_sort,
         "frame_estimate_with_symbols":estimated_with_symbols,
         "frame_estimate_without_symbols":estimated_without_symbols,
         "symbol_json_bytes":symbols_json_bytes,

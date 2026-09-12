@@ -34,6 +34,12 @@ struct Event {
     text: [u8; 80],
 }
 pub struct Probes {
+    sorted_root: std::cell::RefCell<
+        Option<(
+            crate::flame::Shared<crate::flame::Node>,
+            crate::flame::Shared<crate::flame::Node>,
+        )>,
+    >,
     cpu_sampler: Option<crate::cpu_profile::Sampler>,
     capture_id: String,
     owned_attachments: BTreeMap<String, String>,
@@ -306,6 +312,7 @@ impl Probes {
                 .push("Kernel symbols restricted; addresses retained".into());
         }
         Ok(Self {
+            sorted_root: Default::default(),
             cpu_sampler,
             capture_id: crate::recording::stamp().to_string(),
             owned_attachments,
@@ -356,6 +363,7 @@ impl Probes {
             .duration_since(self.started)
     }
     pub fn poll(&mut self) -> io::Result<()> {
+        let _cost = crate::cpu_cost::scope("probe.poll");
         self.profile.metadata.elapsed_seconds = self.elapsed().as_secs_f64();
         if let Some(sampler) = &mut self.cpu_sampler {
             sampler.poll(
@@ -544,6 +552,7 @@ impl Probes {
         Ok(())
     }
     pub fn apply(&self, t: &mut Telemetry) {
+        let _cost = crate::cpu_cost::scope("probe.publish");
         if self.mode == "cpu" {
             t.capabilities.insert("cpu".into(), Quality::Available);
         }
@@ -564,7 +573,17 @@ impl Probes {
         );
         if !self.profile.is_empty() || self.mode == "cpu" || self.profile.quality.attempted > 0 {
             let mut profile = self.profile.clone();
-            profile.sort();
+            let mut cache = self.sorted_root.borrow_mut();
+            if let Some((original, sorted)) = cache
+                .as_ref()
+                .filter(|(original, _)| original.same_version(&self.profile.root))
+            {
+                let _ = original;
+                profile.root = sorted.clone();
+            } else {
+                profile.sort();
+                *cache = Some((self.profile.root.clone(), profile.root.clone()));
+            }
             t.profile = profile;
         }
         if !self.stack_tally.is_empty() {

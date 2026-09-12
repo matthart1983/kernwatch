@@ -12,6 +12,7 @@ type Fields = Vec<(String, String)>;
 pub struct Extra {
     cache: BTreeMap<String, (u64, Fields)>,
     cursor: usize,
+    swept_at: u64,
 }
 pub fn bounded_file(path: impl AsRef<Path>, limit: usize) -> io::Result<String> {
     let mut data = Vec::new();
@@ -52,8 +53,11 @@ impl Extra {
         let (then, fields) = self.cache.get(&key).unwrap();
         let mut fields = fields.clone();
         fields.push(("metadata sampled boot ms".into(), then.to_string()));
-        self.cache
-            .retain(|_, (then, _)| at.saturating_sub(*then) < 600000);
+        if at.saturating_sub(self.swept_at) >= 60000 {
+            self.cache
+                .retain(|_, (then, _)| at.saturating_sub(*then) < 600000);
+            self.swept_at = at;
+        }
         fields
     }
     pub fn modules(&mut self, t: &mut Telemetry) {

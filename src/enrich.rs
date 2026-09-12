@@ -8,7 +8,9 @@ pub struct Enricher {
     previous: BTreeMap<String, Vec<u64>>,
     /// Cgroup path per (pid, start ticks). A task does not usually change
     /// cgroup, and reading it was a quarter of the per-task procfs work.
-    cgroups: BTreeMap<(u32, u64), String>,
+    cgroups: BTreeMap<(u32, u64), (u64, String)>,
+    statuses: BTreeMap<(u32, u64), (u64, Status)>,
+    task_previous: BTreeMap<(u32, u64), [u64; 6]>,
     last: Instant,
     history: BTreeMap<String, Series>,
 
@@ -22,6 +24,8 @@ impl Default for Enricher {
             logs: crate::logs::KernelLog::default(),
             previous: BTreeMap::new(),
             cgroups: BTreeMap::new(),
+            statuses: BTreeMap::new(),
+            task_previous: BTreeMap::new(),
             last: Instant::now(),
             history: BTreeMap::new(),
 
@@ -113,6 +117,7 @@ pub fn await_max(devices: &[Device]) -> Option<f64> {
 }
 impl Enricher {
     pub fn enrich(&mut self, s: &mut Snapshot) {
+        let _cost = crate::cpu_cost::scope("enricher.total");
         let dt = self.last.elapsed().as_secs_f64().max(0.001);
         self.last = Instant::now();
         let mut t = Telemetry {
@@ -252,6 +257,8 @@ impl Enricher {
         }
         let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64;
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;
+        let tasks_cost = crate::cpu_cost::scope("enricher.tasks");
+        let demand = crate::sources::demand();
         let mut current_tasks = BTreeMap::new();
         let mut thread_ids = std::collections::BTreeSet::new();
         if let Ok(entries) = fs::read_dir("/proc") {
@@ -283,37 +290,76 @@ impl Enricher {
             }
         }
         {
+            use std::{fmt::Write as _, io::Read as _};
+            let mut path = String::with_capacity(64);
+            let mut stat = String::with_capacity(1024);
             for (tgid, pid) in thread_ids {
-                let path = format!("/proc/{tgid}/task/{pid}");
-                let stat = read(&format!("{path}/stat"));
-                let Some((name, state, cpu, ticks, rss)) = crate::collect::parse_task(&stat) else {
+                path.clear();
+                let _ = write!(&mut path, "/proc/{tgid}/task/{pid}");
+                let base = path.len();
+                path.push_str("/stat");
+                stat.clear();
+                let read_stat = fs::File::open(&path).and_then(|mut f| f.read_to_string(&mut stat));
+                path.truncate(base);
+                if read_stat.is_err() {
+                    continue;
+                }
+                let Some(end) = stat.rfind(')') else { continue };
+                let Some(start) = stat.find('(') else {
                     continue;
                 };
-                let Some(end) = stat.rfind(')') else { continue };
-                let fields = stat[end + 2..].split_whitespace().collect::<Vec<_>>();
+                let fields = stat[end + 1..].split_whitespace().collect::<Vec<_>>();
+                if fields.len() < 37 {
+                    continue;
+                }
+                let name = stat[start + 1..end].to_owned();
+                let state = fields[0].to_owned();
+                let cpu = fields[36].parse::<usize>().unwrap_or(0);
+                let ticks = fields[11]
+                    .parse::<u64>()
+                    .unwrap_or(0)
+                    .saturating_add(fields[12].parse::<u64>().unwrap_or(0));
+                let rss = fields[21].parse::<u64>().unwrap_or(0);
                 let start_ticks = fields
                     .get(19)
                     .and_then(|s| s.parse::<u64>().ok())
                     .unwrap_or(0);
-                let key = format!("task:{pid}:{start_ticks}");
+                let key = (pid, start_ticks);
                 let pct = self
-                    .previous
+                    .task_previous
                     .get(&key)
                     .map(|p| ticks.saturating_sub(p[0]) as f64 / hz / dt * 100.);
-                let status = status_fields(&format!("{path}/status"));
+                let fresh_status = self.statuses.get(&key).is_none_or(|(at, _)| {
+                    t.at_ms.saturating_sub(*at)
+                        >= if demand.tasks.contains(&key) {
+                            1000
+                        } else {
+                            5000
+                        }
+                });
+                let mut voluntary_s = None;
+                let mut involuntary_s = None;
+                let mut status_interval_ms = None;
+                if fresh_status {
+                    let status = status_fields(&format!("{path}/status"));
+                    if let Some((at, old)) = self.statuses.get(&key) {
+                        let elapsed = t.at_ms.saturating_sub(*at);
+                        status_interval_ms = Some(elapsed);
+                        let rate = |new: Option<u64>, old: Option<u64>| {
+                            new.zip(old)
+                                .and_then(|(n, o)| n.checked_sub(o))
+                                .filter(|_| elapsed > 0)
+                                .map(|n| n as f64 * 1000. / elapsed as f64)
+                        };
+                        voluntary_s = rate(status.voluntary, old.voluntary);
+                        involuntary_s = rate(status.involuntary, old.involuntary);
+                    }
+                    self.statuses.insert(key, (t.at_ms, status));
+                }
+                let (status_at, status) = &self.statuses[&key];
                 let (voluntary, involuntary) = (status.voluntary, status.involuntary);
-                let ctx_rate = |n: Option<u64>, i: usize| {
-                    n.and_then(|n| {
-                        self.previous
-                            .get(&key)
-                            .and_then(|v| v.get(i))
-                            .map(|p| n.saturating_sub(*p) as f64 / dt)
-                    })
-                };
-                let voluntary_s = ctx_rate(voluntary, 1);
-                let involuntary_s = ctx_rate(involuntary, 2);
                 let blocked_since = if state == "D" {
-                    self.previous
+                    self.task_previous
                         .get(&key)
                         .and_then(|v| v.get(3))
                         .copied()
@@ -326,19 +372,19 @@ impl Enricher {
                     (blocked_since > 0).then(|| t.at_ms.saturating_sub(blocked_since) as f64);
                 let minor = fields.get(7).and_then(|v| v.parse::<u64>().ok());
                 let minor_faults_s = minor.and_then(|n| {
-                    self.previous
+                    self.task_previous
                         .get(&key)
                         .and_then(|v| v.get(4))
                         .map(|old| n.saturating_sub(*old) as f64 / dt)
                 });
                 let rss_growth_bytes_s = self
-                    .previous
+                    .task_previous
                     .get(&key)
                     .and_then(|v| v.get(5))
                     .map(|old| (rss as f64 - *old as f64) * page as f64 / dt);
                 current_tasks.insert(
                     key,
-                    vec![
+                    [
                         ticks,
                         voluntary.unwrap_or(0),
                         involuntary.unwrap_or(0),
@@ -349,18 +395,21 @@ impl Enricher {
                 );
                 let affinity = status.cpus_allowed.clone();
                 let cgroup = match self.cgroups.get(&(pid, start_ticks)) {
-                    Some(known) => known.clone(),
-                    None => {
+                    Some((at, known)) if t.at_ms.saturating_sub(*at) < 5000 => known.clone(),
+                    _ => {
                         let read = read(&format!("{path}/cgroup"))
                             .lines()
                             .find_map(|l| l.strip_prefix("0::"))
                             .unwrap_or("")
                             .to_string();
-                        self.cgroups.insert((pid, start_ticks), read.clone());
+                        self.cgroups
+                            .insert((pid, start_ticks), (t.at_ms, read.clone()));
                         read
                     }
                 };
                 t.tasks.push(Task {
+                    status_at_ms: Some(*status_at),
+                    status_interval_ms,
                     nice: fields.get(16).and_then(|v| v.parse().ok()),
                     age_ms: Some(
                         t.at_ms
@@ -406,7 +455,11 @@ impl Enricher {
                             .into()
                         })
                         .unwrap_or_default(),
-                    wchan: read(&format!("{path}/wchan")),
+                    wchan: if state == "D" || state == "S" {
+                        read(&format!("{path}/wchan"))
+                    } else {
+                        String::new()
+                    },
                     verdict: if state == "D" {
                         "blocked"
                     } else if pct.unwrap_or(0.) > 90. {
@@ -422,8 +475,10 @@ impl Enricher {
                 }
             }
         }
-        self.previous.retain(|k, _| !k.starts_with("task:"));
-        self.previous.extend(current_tasks);
+        drop(tasks_cost);
+        self.statuses
+            .retain(|key, _| current_tasks.contains_key(key));
+        self.task_previous = current_tasks;
         t.tasks.sort_by(|a, b| {
             let severity = |x: &Task| {
                 if x.state == "D" {
@@ -662,6 +717,26 @@ impl Enricher {
             }
         }
         self.topology.sample(&mut t);
+        for task in t
+            .tasks
+            .iter()
+            .filter(|task| demand.tasks.contains(&(task.pid, task.start_ticks)))
+        {
+            let fields = t.details.entry(format!("task:{}", task.pid)).or_default();
+            if let Some(at) = task.status_at_ms {
+                fields.push(("status sampled boot ms".into(), at.to_string()));
+                fields.push((
+                    "status age ms".into(),
+                    t.at_ms.saturating_sub(at).to_string(),
+                ));
+            }
+            if let Some(interval) = task.status_interval_ms {
+                fields.push((
+                    "context-switch rate interval ms".into(),
+                    interval.to_string(),
+                ));
+            }
+        }
         let await_max = await_max(&t.devices);
         t.record(
             "disk.await_max",
@@ -854,6 +929,19 @@ impl Enricher {
             t.modules.iter().map(crate::model::module_row).collect(),
             &["Loaded-module metadata; trust flags alone do not establish a performance cause."],
         );
+        if crate::cpu_cost::enabled() {
+            crate::cpu_cost::gauge("tasks", t.tasks.len() as u64);
+            crate::cpu_cost::gauge("cgroups", t.cgroups.len() as u64);
+            crate::cpu_cost::gauge("series", t.series.len() as u64);
+            crate::cpu_cost::gauge(
+                "history_samples",
+                t.series.values().map(|s| s.samples.len() as u64).sum(),
+            );
+            crate::cpu_cost::gauge(
+                "history_version_bytes",
+                t.series.values().map(|s| s.samples.bytes() as u64).sum(),
+            );
+        }
         self.history = t.series.clone();
         s.telemetry = t;
     }

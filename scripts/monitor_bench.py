@@ -21,7 +21,10 @@ import time
 def sample(pid):
     fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
     status = dict(line.split(':', 1) for line in Path(f'/proc/{pid}/status').read_text().splitlines())
-    return {'cpu_seconds': (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK'),
+    return {'user_seconds': int(fields[11]) / os.sysconf('SC_CLK_TCK'),
+            'system_seconds': int(fields[12]) / os.sysconf('SC_CLK_TCK'),
+            'reaped_child_seconds': (int(fields[13]) + int(fields[14])) / os.sysconf('SC_CLK_TCK'),
+            'cpu_seconds': (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK'),
             'rss_kib': int(status['VmRSS'].split()[0]), 'threads': int(status['Threads'])}
 
 
@@ -77,6 +80,10 @@ def run(binary, seconds, warmup, mode):
             return {'binary': str(binary), 'mode': mode, 'warmup_seconds': warmup,
                     'elapsed_seconds': elapsed,
                     'cpu_pct_one_core': 100 * (after['cpu_seconds'] - before['cpu_seconds']) / elapsed,
+                    'user_cpu_pct': 100 * (after['user_seconds'] - before['user_seconds']) / elapsed,
+                    'system_cpu_pct': 100 * (after['system_seconds'] - before['system_seconds']) / elapsed,
+                    'reaped_helper_cpu_pct': 100 * (after['reaped_child_seconds'] - before['reaped_child_seconds']) / elapsed,
+                    'observer_cpu_pct': 100 * (after['cpu_seconds'] + after['reaped_child_seconds'] - before['cpu_seconds'] - before['reaped_child_seconds']) / elapsed,
                     'rss_start_kib': before['rss_kib'], 'rss_end_kib': after['rss_kib'],
                     'rss_peak_kib': max(s['rss_kib'] for s in samples),
                     'terminal_bytes_per_second': (traffic - traffic_before) / elapsed,

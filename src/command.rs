@@ -11,6 +11,26 @@ pub struct Output {
     pub stderr: String,
 }
 pub fn run(program: &str, args: &[&str], timeout: Duration, limit: usize) -> io::Result<Output> {
+    // At most two optional helpers at once. Waiting happens only on metadata
+    // workers, never on the acquisition/UI thread; lifecycle handling is intact.
+    static ACTIVE: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+    static READY: std::sync::Condvar = std::sync::Condvar::new();
+    struct Permit;
+    impl Drop for Permit {
+        fn drop(&mut self) {
+            *ACTIVE.lock().unwrap() -= 1;
+            READY.notify_one();
+        }
+    }
+    let mut active = ACTIVE.lock().unwrap();
+    while *active >= 2 {
+        active = READY.wait(active).unwrap();
+    }
+    *active += 1;
+    drop(active);
+    let _permit = Permit;
+    let _cost = crate::cpu_cost::scope("helper.parent");
+    crate::cpu_cost::counter("helper_launch_attempts", 1);
     let owner = std::process::id() as i32;
     let mut command = Command::new(program);
     // SAFETY: pre-exec uses only async-signal-safe Linux syscalls; no allocation or locks.

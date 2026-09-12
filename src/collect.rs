@@ -69,6 +69,7 @@ impl Collector {
         }
     }
     pub fn sample(&mut self) -> Snapshot {
+        let _cost = crate::cpu_cost::scope("collector.total");
         let mut s = Snapshot {
             captured: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
