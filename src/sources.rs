@@ -6,43 +6,56 @@ struct Source {
     send: SyncSender<Telemetry>,
     receive: Receiver<Telemetry>,
     latest: Option<Telemetry>,
+    /// A request is outstanding. Without this the caller rebuilds the payload
+    /// every tick and throws it away when the worker is still busy, which for
+    /// the task-carrying sources means cloning thousands of tasks per second
+    /// for nothing.
+    pending: bool,
 }
 impl Source {
     fn new(name: &'static str, collect: fn(&mut Inventory, &mut Telemetry)) -> Self {
         let (send, requests) = sync_channel::<Telemetry>(1);
         let (results, receive) = sync_channel(1);
-        std::thread::spawn(move || {
-            let mut inventory = Inventory::default();
-            let mut history = std::collections::BTreeMap::new();
-            while let Ok(mut t) = requests.recv() {
-                let start = std::time::Instant::now();
-                t.at_ms = crate::enrich::monotonic_ms();
-                t.series = std::mem::take(&mut history);
-                collect(&mut inventory, &mut t);
-                t.details.insert(
-                    format!("source:{name}"),
-                    vec![
-                        ("sample boot ms".into(), t.at_ms.to_string()),
-                        (
-                            "collection ms".into(),
-                            format!("{:.2}", start.elapsed().as_secs_f64() * 1000.),
-                        ),
-                    ],
-                );
-                history = t.series.clone();
-                let _ = results.try_send(t);
-            }
-        });
+        let _ = std::thread::Builder::new()
+            .name("topology".into())
+            .spawn(move || {
+                let mut inventory = Inventory::default();
+                let mut history = std::collections::BTreeMap::new();
+                while let Ok(mut t) = requests.recv() {
+                    let start = std::time::Instant::now();
+                    t.at_ms = crate::enrich::monotonic_ms();
+                    t.series = std::mem::take(&mut history);
+                    collect(&mut inventory, &mut t);
+                    t.details.insert(
+                        format!("source:{name}"),
+                        vec![
+                            ("sample boot ms".into(), t.at_ms.to_string()),
+                            (
+                                "collection ms".into(),
+                                format!("{:.2}", start.elapsed().as_secs_f64() * 1000.),
+                            ),
+                        ],
+                    );
+                    history = t.series.clone();
+                    let _ = results.try_send(t);
+                }
+            });
         Self {
             name,
             send,
             receive,
             latest: None,
+            pending: false,
         }
     }
     fn update(&mut self, t: &mut Telemetry) {
         while let Ok(result) = self.receive.try_recv() {
             self.latest = Some(result);
+            self.pending = false;
+        }
+        if self.pending {
+            self.publish(t);
+            return;
         }
         let request = Telemetry {
             tasks: if self.name == "modules/pss" || self.name == "task_metadata" {
@@ -74,7 +87,12 @@ impl Source {
             },
             ..Default::default()
         };
-        let _ = self.send.try_send(request);
+        self.pending = self.send.try_send(request).is_ok();
+        self.publish(t);
+    }
+
+    /// Merge the worker's most recent result into the snapshot.
+    fn publish(&mut self, t: &mut Telemetry) {
         if let Some(source) = &self.latest {
             let age = t.at_ms.saturating_sub(source.at_ms);
             t.capabilities.insert(
@@ -277,6 +295,7 @@ mod tests {
             send,
             receive,
             latest: Some(old),
+            pending: false,
         };
         source.update(&mut now);
         assert!(now.details.is_empty());

@@ -1101,15 +1101,23 @@ fn scheduler(f: &mut Frame, r: Rect, a: &App) {
         },
         "g change subject · ↵ inspect",
     );
+    // One index for the whole table rather than a scan per row: the subject
+    // list is one entry per task in this mode, so the scan was quadratic. It
+    // also never matched live, where the key carries start_ticks, so every row
+    // fell through to the unmeasured branch.
+    let by_key: std::collections::BTreeMap<String, &crate::domain::Task> = if a.mode == 1 {
+        t(a).tasks
+            .iter()
+            .map(|x| (task_latency_key(a, x), x))
+            .collect()
+    } else {
+        Default::default()
+    };
     let data = subjects
         .iter()
         .map(|(label, key, cpu, group)| {
             if a.mode == 1 {
-                let task = t(a)
-                    .tasks
-                    .iter()
-                    .find(|x| key == &format!("task.{}", x.pid));
-                if let Some(x) = task {
+                if let Some(x) = by_key.get(key.as_str()) {
                     return vec![
                         label.clone(),
                         x.state.clone(),

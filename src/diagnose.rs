@@ -8,9 +8,14 @@ pub struct Baseline {
     pub mean: f64,
     pub variance: f64,
     pub since_ms: u64,
+    /// When this subject was last observed, so a baseline for a process that
+    /// no longer exists does not outlive it.
+    #[serde(default)]
+    pub last_ms: u64,
 }
 impl Baseline {
     pub fn add(&mut self, value: f64, now: u64) {
+        self.last_ms = now;
         if self.count == 0 {
             self.mean = value;
             self.since_ms = now;
@@ -31,6 +36,10 @@ pub struct Engine {
     active: BTreeMap<String, Issue>,
     streak: BTreeMap<String, u32>,
     clear: BTreeMap<String, u64>,
+    /// When a subject stopped being observed. Eviction keys off this rather
+    /// than off the baselines, which a topology change wipes wholesale.
+    #[serde(default)]
+    absent: BTreeMap<String, u64>,
     boot: String,
     #[serde(default)]
     scope: String,
@@ -156,6 +165,7 @@ impl Engine {
         for (key, value, limit, title, subject, source) in observed {
             present.insert(key.clone());
             let base = self.baselines.entry(key.clone()).or_default();
+            base.last_ms = t.at_ms;
             let anomalous = value > limit
                 || (base.ready(t.at_ms)
                     && value > base.mean + 3. * base.variance.sqrt()
@@ -195,6 +205,31 @@ impl Engine {
                 issue.state = "data unavailable".into();
             }
         }
+        // Subjects are keyed per pid and per cgroup, so without this every
+        // process the host has ever blocked keeps a baseline, an issue and a
+        // place in every snapshot, and the saved state grows until it is
+        // refused on load. A subject is forgotten once it has been gone long
+        // enough that it is not coming back; until then its issue stays
+        // visible, marked unavailable.
+        const FORGET_MS: u64 = 600_000;
+        let at_ms = t.at_ms;
+        self.absent.retain(|key, _| !present.contains(key));
+        for key in self.active.keys().chain(self.baselines.keys()) {
+            if !present.contains(key) {
+                self.absent.entry(key.clone()).or_insert(at_ms);
+            }
+        }
+        let gone: std::collections::BTreeSet<String> = self
+            .absent
+            .iter()
+            .filter(|(_, since)| at_ms.saturating_sub(**since) >= FORGET_MS)
+            .map(|(key, _)| key.clone())
+            .collect();
+        self.baselines.retain(|key, _| !gone.contains(key));
+        self.active.retain(|key, _| !gone.contains(key));
+        self.streak.retain(|key, _| !gone.contains(key));
+        self.clear.retain(|key, _| !gone.contains(key));
+        self.absent.retain(|key, _| !gone.contains(key));
         t.issues = self.active.values().cloned().collect();
         t.issues.sort_by_key(|i| {
             (

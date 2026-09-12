@@ -6,6 +6,9 @@ pub struct Enricher {
     inventory: crate::bpf::Inventory,
     logs: crate::logs::KernelLog,
     previous: BTreeMap<String, Vec<u64>>,
+    /// Cgroup path per (pid, start ticks). A task does not usually change
+    /// cgroup, and reading it was a quarter of the per-task procfs work.
+    cgroups: BTreeMap<(u32, u64), String>,
     last: Instant,
     history: BTreeMap<String, Series>,
 
@@ -18,6 +21,7 @@ impl Default for Enricher {
             inventory: crate::bpf::Inventory::default(),
             logs: crate::logs::KernelLog::default(),
             previous: BTreeMap::new(),
+            cgroups: BTreeMap::new(),
             last: Instant::now(),
             history: BTreeMap::new(),
 
@@ -26,7 +30,13 @@ impl Default for Enricher {
     }
 }
 fn read(p: &str) -> String {
-    fs::read_to_string(p).unwrap_or_default().trim().into()
+    // Trim in place. `.trim().into()` copied every procfs file a second time,
+    // and this runs several thousand times a second.
+    let mut s = fs::read_to_string(p).unwrap_or_default();
+    s.truncate(s.trim_end().len());
+    let lead = s.len() - s.trim_start().len();
+    s.drain(..lead);
+    s
 }
 fn kv(p: &str) -> BTreeMap<String, String> {
     read(p)
@@ -297,11 +307,18 @@ impl Enricher {
                     ],
                 );
                 let affinity = status.get("Cpus_allowed_list").cloned().unwrap_or_default();
-                let cgroup = read(&format!("{path}/cgroup"))
-                    .lines()
-                    .find_map(|l| l.strip_prefix("0::"))
-                    .unwrap_or("")
-                    .to_string();
+                let cgroup = match self.cgroups.get(&(pid, start_ticks)) {
+                    Some(known) => known.clone(),
+                    None => {
+                        let read = read(&format!("{path}/cgroup"))
+                            .lines()
+                            .find_map(|l| l.strip_prefix("0::"))
+                            .unwrap_or("")
+                            .to_string();
+                        self.cgroups.insert((pid, start_ticks), read.clone());
+                        read
+                    }
+                };
                 let memory_field = |key: &str| {
                     status
                         .get(key)
@@ -717,14 +734,32 @@ impl Enricher {
             .iter()
             .map(|x| (x.pid, x.start_ticks, x.cpu_pct))
             .collect::<Vec<_>>();
+        let mut live_runtime = std::collections::HashSet::with_capacity(runtime.len());
         for (pid, start, cpu) in runtime {
-            t.record(
-                &format!("task.runtime{pid}.{start}"),
-                cpu,
-                "% / one CPU",
-                100.,
-            );
+            let key = format!("task.runtime{pid}.{start}");
+            t.record(&key, cpu, "% / one CPU", 100.);
+            live_runtime.insert(key);
         }
+        // A task's history dies with the task. Without this every process the
+        // host has ever run keeps a series, which grows the snapshot, the
+        // per-tick copy below, and every recorded frame. Other series are kept
+        // until they go stale, so a device or cgroup that reappears keeps its
+        // past.
+        // The cgroup cache follows the same rule as the histories: a task that
+        // is gone keeps nothing.
+        let live: std::collections::HashSet<(u32, u64)> =
+            t.tasks.iter().map(|x| (x.pid, x.start_ticks)).collect();
+        self.cgroups.retain(|key, _| live.contains(key));
+        let at_ms = t.at_ms;
+        t.series.retain(|key, series| {
+            if key.starts_with("task.runtime") {
+                return live_runtime.contains(key);
+            }
+            series
+                .samples
+                .last()
+                .is_some_and(|s| at_ms.saturating_sub(s.at_ms) < 600_000)
+        });
 
         let prior_event = self.logs.events.last().map(|e| e.at_ms).unwrap_or(0);
         self.logs.poll();

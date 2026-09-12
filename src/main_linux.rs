@@ -187,7 +187,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )));
     let td = trace_data.clone();
     let ts = stop.clone();
-    let tracer = std::thread::spawn(move || {
+    let tracer = std::thread::Builder::new()
+        .name("tracer".into())
+        .spawn(move || {
         let mut session: Option<kernwatch::probes::Probes> = None;
         let mut started = Instant::now();
         let mut duration = Duration::from_secs(30);
@@ -249,7 +251,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let live_enabled = Arc::new(AtomicBool::new(app.replay.is_none()));
     let collect_enabled = live_enabled.clone();
-    let worker = std::thread::spawn(move || {
+    let worker = std::thread::Builder::new()
+        .name("sampler".into())
+        .spawn(move || {
         let mut next_sample = Instant::now();
         while !stopped.load(Ordering::Relaxed) {
             if !collect_enabled.load(Ordering::Relaxed) {
@@ -433,8 +437,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     stop.store(true, Ordering::Relaxed);
-    let _ = worker.join();
-    let _ = tracer.join();
+    let _ = worker.map(|h| h.join());
+    let _ = tracer.map(|h| h.join());
     result?;
     Ok(())
 }

@@ -290,20 +290,22 @@ impl Default for Inventory {
     fn default() -> Self {
         let (send, requests) = std::sync::mpsc::sync_channel(1);
         let (results, receive) = std::sync::mpsc::sync_channel(1);
-        std::thread::spawn(move || {
-            let mut collector = Collector::default();
-            let mut history = BTreeMap::new();
-            while let Ok(at_ms) = requests.recv() {
-                let mut t = Telemetry {
-                    at_ms,
-                    series: std::mem::take(&mut history),
-                    ..Default::default()
-                };
-                let view = collector.sample(&mut t);
-                history = t.series.clone();
-                let _ = results.try_send((t, view));
-            }
-        });
+        let _ = std::thread::Builder::new()
+            .name("bpf-inventory".into())
+            .spawn(move || {
+                let mut collector = Collector::default();
+                let mut history = BTreeMap::new();
+                while let Ok(at_ms) = requests.recv() {
+                    let mut t = Telemetry {
+                        at_ms,
+                        series: std::mem::take(&mut history),
+                        ..Default::default()
+                    };
+                    let view = collector.sample(&mut t);
+                    history = t.series.clone();
+                    let _ = results.try_send((t, view));
+                }
+            });
         Self {
             send,
             receive,

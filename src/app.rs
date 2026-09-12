@@ -164,6 +164,70 @@ impl App {
     pub fn cursor(&self) -> u64 {
         self.time_cursor.unwrap_or(self.snapshot.telemetry.at_ms)
     }
+    /// Roughly how much heap a retained frame holds.
+    ///
+    /// Measured by arithmetic rather than by serializing the frame and taking
+    /// its length, which cost about 8 ms of every second to produce one
+    /// number. The result is deliberately close to what the old estimate
+    /// reported: a frame on a busy host really does hold several megabytes, so
+    /// the timeline's reach is limited by what a frame retains, not by how it
+    /// is counted.
+    pub fn frame_bytes(frame: &Snapshot) -> usize {
+        let t = &frame.telemetry;
+        let strings = |fields: &[(String, String)]| -> usize {
+            fields.iter().map(|(k, v)| k.len() + v.len() + 48).sum()
+        };
+        let tasks: usize = t
+            .tasks
+            .iter()
+            .map(|x| {
+                std::mem::size_of::<crate::domain::Task>()
+                    + x.name.len()
+                    + x.state.len()
+                    + x.cgroup.len()
+                    + x.affinity.len()
+                    + x.policy.len()
+                    + x.wchan.len()
+                    + x.verdict.len()
+            })
+            .sum();
+        let details: usize = t
+            .details
+            .iter()
+            .map(|(k, v)| k.len() + 48 + strings(v))
+            .sum();
+        let events: usize = t
+            .events
+            .iter()
+            .map(|e| std::mem::size_of::<crate::domain::Event>() + e.message.len() + e.source.len())
+            .sum();
+        let views: usize = frame
+            .views
+            .iter()
+            .map(|v| {
+                v.rows
+                    .iter()
+                    .map(|r| r.iter().map(|c| c.len() + 24).sum::<usize>())
+                    .sum::<usize>()
+            })
+            .sum();
+        // The profile is retained with the frame so the time cursor still shows it.
+        fn nodes(n: &crate::flame::Node) -> usize {
+            48 + n.name.len() + n.children.iter().map(nodes).sum::<usize>()
+        }
+        let profile = nodes(&t.profile.root);
+        let coarse = t.cgroups.len() * 512
+            + t.devices.len() * 1024
+            + t.modules.len() * 256
+            + t.metrics.len() * 128
+            + t.issues.len() * 1024;
+        // Summing field lengths undercounts what the allocator holds: per-allocation
+        // headers, String capacity above length, and BTreeMap nodes. Calibrated
+        // against RSS growth for 20 retained frames on a 2700-task host, the real
+        // heap came to 2.19x this sum.
+        (tasks + details + events + views + coarse + profile + 4096) * 219 / 100
+    }
+
     fn retain_frame(&mut self, snapshot: &Snapshot) {
         if self
             .timeline_frames
@@ -174,7 +238,7 @@ impl App {
         }
         let mut frame = snapshot.clone();
         frame.telemetry.series.clear();
-        let size = serde_json::to_vec(&frame).map(|v| v.len() * 3).unwrap_or(0);
+        let size = Self::frame_bytes(&frame);
         self.timeline_bytes += size;
         self.timeline_frames.push_back((size, frame));
         while self.timeline_frames.len() > 600
