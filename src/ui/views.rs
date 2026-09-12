@@ -3415,7 +3415,7 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
         format!("{subject} · {}", zoom.join(" › "))
     };
     let area = p(f, bands[1], a, 1, &title, &subtitle);
-    let cells = crate::flame::layout(root, area.width, area.height);
+    let cells = crate::flame::layout(root, area.width, area.height, &a.flame_cursor);
     // The cursor can sit on any frame, so the highlighted cell is the one
     // whose path matches it rather than a child of the root.
     let selected = cells
@@ -3467,17 +3467,43 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
                 },
             ));
             fields.push(("path".into(), a.flame_path().join(" › ")));
-            if selected == usize::MAX {
-                fields.push((
-                    "drawn".into(),
-                    "no; this frame is narrower than one column".into(),
-                ));
-            }
         }
         _ => {
             fields.push((
                 "frame".into(),
                 "none selected — ↓ enters the profile, h jumps to the hottest path".into(),
+            ));
+        }
+    }
+    // Name what a stand-in is standing in for, so the frames folded into it are
+    // reachable rather than merely counted.
+    if let Some(parent) = a.flame_frame() {
+        let drawn: std::collections::BTreeSet<&str> = cells
+            .cells
+            .iter()
+            .filter(|c| c.path.len() == a.flame_cursor.len() + 1)
+            .map(|c| c.name.as_str())
+            .collect();
+        let folded: Vec<String> = parent
+            .children
+            .iter()
+            .filter(|c| !drawn.contains(c.name.as_str()))
+            .map(|c| {
+                format!(
+                    "{} {:.1}%",
+                    c.name,
+                    c.samples as f64 / root.samples.max(1) as f64 * 100.
+                )
+            })
+            .collect();
+        if !folded.is_empty() {
+            fields.push((
+                "folded here".into(),
+                format!(
+                    "{} callees below one column: {}",
+                    folded.len(),
+                    folded.join(" · ")
+                ),
             ));
         }
     }

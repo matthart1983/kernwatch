@@ -155,13 +155,23 @@ pub struct Layout {
 /// share of its parent proportional to its samples. Children narrower than one
 /// cell are collected into a `…` cell where there is room for one, and counted
 /// in `hidden` where there is not. A frame is never widened to make it visible.
-pub fn layout(root: &Node, width: u16, depth_limit: u16) -> Layout {
+pub fn layout(root: &Node, width: u16, depth_limit: u16, cursor: &[usize]) -> Layout {
     let mut out = Layout::default();
     if width == 0 || depth_limit == 0 || root.samples == 0 {
         return out;
     }
-    place(root, 0, width, 0, depth_limit, &mut Vec::new(), &mut out);
+    let frame = Frame {
+        limit: depth_limit,
+        cursor,
+    };
+    place(root, 0, width, 0, &frame, &mut Vec::new(), &mut out);
     out
+}
+
+/// What stays the same all the way down a layout.
+struct Frame<'a> {
+    limit: u16,
+    cursor: &'a [usize],
 }
 
 fn place(
@@ -169,7 +179,7 @@ fn place(
     x: u16,
     width: u16,
     depth: u16,
-    limit: u16,
+    frame: &Frame<'_>,
     path: &mut Vec<usize>,
     out: &mut Layout,
 ) {
@@ -182,7 +192,7 @@ fn place(
         folded: 0,
         path: path.clone(),
     });
-    if depth + 1 >= limit || width == 0 || node.children.is_empty() {
+    if depth + 1 >= frame.limit || width == 0 || node.children.is_empty() {
         return;
     }
     let total = node.samples.max(1) as u128;
@@ -194,34 +204,47 @@ fn place(
         // the running total. Accumulating would let rounding hand a cell to
         // whichever equal sibling happened to be last, and hide the rest.
         let child_width = ((child.samples as u128 * width as u128) / total) as u16;
-        let child_width = child_width.min(width.saturating_sub(consumed));
+        let mut child_width = child_width.min(width.saturating_sub(consumed));
+        // A frame the reader has moved onto is always drawn, however thin its
+        // share: losing sight of the cursor is worse than one column of
+        // over-statement, and the panel reports the real share anyway.
+        path.push(index);
+        if child_width == 0 && frame.cursor.starts_with(path) && consumed < width {
+            child_width = 1;
+        }
         if child_width == 0 {
+            path.pop();
             narrow += child.samples;
             narrow_frames += 1;
             continue;
         }
-        path.push(index);
         place(
             child,
             x + consumed,
             child_width,
             depth + 1,
-            limit,
+            frame,
             path,
             out,
         );
         path.pop();
         consumed += child_width;
     }
-    // The gap left by this frame's own samples is where a stand-in can go.
     let spare = width.saturating_sub(consumed);
     if narrow_frames > 0 {
         if spare > 0 {
+            // The stand-in covers what the folded frames are worth, not the
+            // whole gap: the rest of it is this frame's own time, and painting
+            // that as callees would overstate them.
+            let earned = ((narrow as u128 * width as u128) / total) as u16;
+            let stand_in = earned.max(1).min(spare);
             out.cells.push(Placed {
                 depth: depth + 1,
                 x: x + consumed,
-                width: spare,
-                name: "…".into(),
+                width: stand_in,
+                // Say how many are in there, so a hidden frame is visibly
+                // hidden rather than silently absent.
+                name: format!("…{narrow_frames}"),
                 samples: narrow,
                 folded: narrow_frames,
                 path: path.clone(),
@@ -292,7 +315,7 @@ mod tests {
     #[test]
     fn children_divide_their_parent_and_never_overflow_it() {
         let p = profile(&[("a;b", 3), ("a;c", 1)]);
-        let l = layout(&p.root, 40, 8);
+        let l = layout(&p.root, 40, 8, &[]);
         let root = &l.cells[0];
         assert_eq!((root.x, root.width), (0, 40));
         for cell in &l.cells {
@@ -316,28 +339,52 @@ mod tests {
             entries.push((path, 1));
         }
         let p = profile(&entries);
-        let l = layout(&p.root, 10, 8);
+        let l = layout(&p.root, 10, 8, &[]);
         assert!(
             !l.cells.iter().any(|c| c.name.starts_with('t')),
             "a sub-cell frame must not be rounded up into visibility"
         );
-        let stand_in = l.cells.iter().find(|c| c.name == "…");
+        let stand_in = l.cells.iter().find(|c| c.name.starts_with('…'));
         match stand_in {
             Some(cell) => {
                 assert_eq!(cell.folded, 3);
                 assert_eq!(cell.samples, 3);
+                // The count is on the cell, so a hidden frame is visibly
+                // hidden rather than silently absent.
+                assert_eq!(cell.name, "…3");
             }
             None => assert_eq!(l.hidden, 3),
         }
     }
     #[test]
+    fn the_frame_under_the_cursor_is_drawn_however_thin_its_share() {
+        let mut entries = vec![("a;wide", 190u64)];
+        for path in ["a;t1", "a;t2", "a;t3"] {
+            entries.push((path, 1));
+        }
+        let p = profile(&entries);
+        // Without a cursor the tail folds away.
+        let plain = layout(&p.root, 10, 8, &[]);
+        assert!(!plain.cells.iter().any(|c| c.name == "t3"));
+        // The reader has moved onto the last of them: root -> a -> t3.
+        let a = p.root.at(&["a".into()]).unwrap();
+        let index = a.children.iter().position(|c| c.name == "t3").unwrap();
+        let l = layout(&p.root, 10, 8, &[0, index]);
+        let drawn = l
+            .cells
+            .iter()
+            .find(|c| c.name == "t3")
+            .expect("cursor drawn");
+        assert_eq!(drawn.width, 1, "one column, not a share it did not earn");
+    }
+    #[test]
     fn depth_limit_and_degenerate_areas_produce_nothing_unplaceable() {
         let p = profile(&[("a;b;c;d", 4)]);
-        let l = layout(&p.root, 20, 2);
+        let l = layout(&p.root, 20, 2, &[]);
         assert_eq!(l.cells.iter().map(|c| c.depth).max(), Some(1));
-        assert!(layout(&p.root, 0, 8).cells.is_empty());
-        assert!(layout(&p.root, 20, 0).cells.is_empty());
-        assert!(layout(&Node::default(), 20, 8).cells.is_empty());
+        assert!(layout(&p.root, 0, 8, &[]).cells.is_empty());
+        assert!(layout(&p.root, 20, 0, &[]).cells.is_empty());
+        assert!(layout(&Node::default(), 20, 8, &[]).cells.is_empty());
     }
     #[test]
     fn zooming_selects_a_subtree_and_an_unknown_path_selects_nothing() {

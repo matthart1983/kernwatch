@@ -624,3 +624,69 @@ fn searching_marks_a_frame_everywhere_it_is_called_from() {
     let plain = render(&a, 160, 52);
     assert!(!plain.contains("frames matching"));
 }
+
+#[test]
+fn no_callee_disappears_off_the_right_edge() {
+    // Frames too thin to draw used to be folded into an unlabelled cell that
+    // swallowed the parent's own time as well, so callees on the right simply
+    // vanished. Every one must now be drawn, counted on a stand-in, or named
+    // in the panel.
+    let mut a = App::new(model::demo());
+    a.switch(FLAME);
+    key(&mut a, KeyCode::Down);
+    key(&mut a, KeyCode::Down);
+    let parent = a.flame_frame().expect("a frame with callees").clone();
+    assert!(parent.children.len() > 4, "worker_loop has many callees");
+    for width in [80u16, 100, 160] {
+        let cells = kernwatch::flame::layout(&parent, width, 10, &[]);
+        let drawn: std::collections::BTreeSet<&str> = cells
+            .cells
+            .iter()
+            .filter(|c| c.depth == 1)
+            .map(|c| c.name.as_str())
+            .collect();
+        let folded: u64 = cells.cells.iter().map(|c| c.folded).sum();
+        let missing = parent
+            .children
+            .iter()
+            .filter(|c| !drawn.contains(c.name.as_str()))
+            .count() as u64;
+        assert_eq!(
+            missing,
+            folded + cells.hidden,
+            "at width {width} every callee is drawn or accounted for"
+        );
+        // A stand-in says how many it stands for.
+        for cell in cells.cells.iter().filter(|c| c.folded > 0) {
+            assert_eq!(cell.name, format!("…{}", cell.folded));
+        }
+    }
+    // And the panel names them rather than leaving a bare count.
+    let screen = render(&a, 160, 52);
+    assert!(screen.contains("folded here"));
+    assert!(
+        screen.contains("below one column"),
+        "the reader is told why they are not drawn"
+    );
+}
+
+#[test]
+fn a_stand_in_never_paints_the_parents_own_time_as_callees() {
+    // The stand-in used to take the whole gap, which is mostly time the frame
+    // spent in itself, overstating the callees folded into it.
+    let mut p = kernwatch::flame::Profile::new("test");
+    p.add(&["root".into()], 500); // half the time is the frame's own
+    p.add(&["root".into(), "big".into()], 499);
+    for tiny in ["t1", "t2", "t3"] {
+        p.add(&["root".into(), tiny.into()], 1);
+    }
+    p.sort();
+    let cells = kernwatch::flame::layout(&p.root, 100, 6, &[]);
+    if let Some(stand_in) = cells.cells.iter().find(|c| c.folded > 0) {
+        assert!(
+            stand_in.width <= 2,
+            "three samples out of 1001 is not {} columns",
+            stand_in.width
+        );
+    }
+}
