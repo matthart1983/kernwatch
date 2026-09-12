@@ -163,7 +163,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tiny = Probes::start(&format!("cpu tgid={pid} entries=1 seconds=2"))?;
     collect(&mut tiny, 2)?;
     assert!(
-        tiny.profile.quality.map_failures > 0 || !tiny.profile.quality.errors.is_empty(),
+        tiny.profile.quality.map_failures > 0,
         "map pressure was not reported"
     );
     println!("MAP_PRESSURE_OK quality={:?}", tiny.profile.quality);
