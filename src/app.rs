@@ -76,6 +76,7 @@ pub struct App {
     demo_host: crate::actions::DemoHost,
     timeline_frames: VecDeque<(usize, Snapshot)>,
     timeline_bytes: usize,
+    timeline_profiles: Vec<(crate::flame::Profile, usize)>,
     latest_snapshot: Option<Snapshot>,
     pub clipboard: Option<String>,
     pub watched: std::collections::BTreeSet<(u32, u64)>,
@@ -139,6 +140,7 @@ impl App {
             demo_host: Default::default(),
             timeline_frames: VecDeque::new(),
             timeline_bytes: 0,
+            timeline_profiles: Vec::new(),
             latest_snapshot: None,
             clipboard: None,
             watched: Default::default(),
@@ -258,6 +260,9 @@ impl App {
     /// the timeline's reach is limited by what a frame retains, not by how it
     /// is counted.
     pub fn frame_bytes(frame: &Snapshot) -> usize {
+        Self::entity_bytes(frame) + Self::profile_bytes(&frame.telemetry.profile)
+    }
+    fn entity_bytes(frame: &Snapshot) -> usize {
         let t = &frame.telemetry;
         let strings = |fields: &[(String, String)]| -> usize {
             fields.iter().map(|(k, v)| k.len() + v.len() + 48).sum()
@@ -296,12 +301,25 @@ impl App {
                     .sum::<usize>()
             })
             .sum();
+        let coarse = t.cgroups.len() * 512
+            + t.devices.len() * 1024
+            + t.modules.len() * 256
+            + t.metrics.len() * 128
+            + t.issues.len() * 1024;
+        // Summing field lengths undercounts what the allocator holds: per-allocation
+        // headers, String capacity above length, and BTreeMap nodes. Calibrated
+        // against RSS growth for 20 retained frames on a 2700-task host, the real
+        // heap came to 2.19x this sum.
+        (tasks + details + events + views + coarse + 4096) * 219 / 100
+    }
+
+    fn profile_bytes(profile: &crate::flame::Profile) -> usize {
         // The profile is retained with the frame so the time cursor still shows it.
         fn nodes(n: &crate::flame::Node) -> usize {
             48 + n.name.len() + n.children.iter().map(nodes).sum::<usize>()
         }
-        let profile = nodes(&t.profile.root)
-            + t.profile
+        let bytes = nodes(&profile.root)
+            + profile
                 .frames
                 .iter()
                 .map(|(k, v)| {
@@ -313,37 +331,45 @@ impl App {
                         + 64
                 })
                 .sum::<usize>()
-            + t.profile
+            + profile
                 .tasks
                 .keys()
                 .map(|k| k.capacity() + 80)
                 .sum::<usize>()
-            + t.profile
+            + profile
                 .quality
                 .errors
                 .keys()
                 .map(|k| k.capacity() + 80)
                 .sum::<usize>()
-            + t.profile
+            + profile
                 .metadata
                 .warnings
                 .iter()
                 .map(|s| s.capacity() + 24)
                 .sum::<usize>()
-            + t.profile.source.capacity()
-            + t.profile.metadata.scope.capacity()
-            + t.profile.metadata.unit.capacity()
-            + t.profile.metadata.cpus.capacity() * 4;
-        let coarse = t.cgroups.len() * 512
-            + t.devices.len() * 1024
-            + t.modules.len() * 256
-            + t.metrics.len() * 128
-            + t.issues.len() * 1024;
-        // Summing field lengths undercounts what the allocator holds: per-allocation
-        // headers, String capacity above length, and BTreeMap nodes. Calibrated
-        // against RSS growth for 20 retained frames on a 2700-task host, the real
-        // heap came to 2.19x this sum.
-        (tasks + details + events + views + coarse + profile + 4096) * 219 / 100
+            + profile.source.capacity()
+            + profile.metadata.scope.capacity()
+            + profile.metadata.unit.capacity()
+            + profile.metadata.cpus.capacity() * 4;
+        bytes
+    }
+    fn recount_timeline_bytes(&mut self) {
+        self.timeline_profiles.retain(|(profile, _)| {
+            self.timeline_frames
+                .iter()
+                .any(|(_, s)| s.telemetry.profile.same_version(profile))
+        });
+        self.timeline_bytes = self
+            .timeline_frames
+            .iter()
+            .map(|(size, _)| size)
+            .sum::<usize>()
+            + self
+                .timeline_profiles
+                .iter()
+                .map(|(_, size)| size)
+                .sum::<usize>();
     }
 
     /// Oldest and newest retained frame times, for checking how far the time
@@ -370,7 +396,17 @@ impl App {
         let series = std::mem::take(&mut snapshot.telemetry.series);
         let frame = snapshot.clone();
         snapshot.telemetry.series = series;
-        let size = Self::frame_bytes(&frame);
+        let size = Self::entity_bytes(&frame);
+        if !self
+            .timeline_profiles
+            .iter()
+            .any(|(p, _)| p.same_version(&frame.telemetry.profile))
+        {
+            let profile_size = Self::profile_bytes(&frame.telemetry.profile);
+            self.timeline_profiles
+                .push((frame.telemetry.profile.clone(), profile_size));
+            self.timeline_bytes += profile_size;
+        }
         self.timeline_bytes += size;
         self.timeline_frames.push_back((size, frame));
         // A frame on a busy host holds several megabytes, so a fixed budget
@@ -394,14 +430,13 @@ impl App {
                 .map(|(_, frame)| frame)
                 .collect();
             self.timeline_frames = kept;
-            self.timeline_bytes = self.timeline_frames.iter().map(|(size, _)| size).sum();
+            self.recount_timeline_bytes();
         }
         while self.timeline_frames.len() > 600
             || (self.timeline_bytes > BUDGET && self.timeline_frames.len() > 1)
         {
-            if let Some((size, _)) = self.timeline_frames.pop_front() {
-                self.timeline_bytes = self.timeline_bytes.saturating_sub(size);
-            }
+            self.timeline_frames.pop_front();
+            self.recount_timeline_bytes();
         }
     }
     pub fn seek_time(&mut self, at: u64) {

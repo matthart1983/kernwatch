@@ -112,9 +112,19 @@ pub struct FrameInfo {
     pub kernel: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Shared<T>(std::sync::Arc<T>);
+impl PartialEq<str> for Shared<String> {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+impl PartialEq<&str> for Shared<String> {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
 impl<T> Shared<T> {
     pub fn same_version(&self, other: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.0, &other.0)
@@ -421,7 +431,7 @@ pub enum ComparisonMode {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Change {
-    pub path: Vec<String>,
+    pub path: Vec<Shared<String>>,
     pub before: u64,
     pub after: u64,
     pub delta: f64,
@@ -573,13 +583,13 @@ impl Profile {
         fn visit(
             before: Option<&Node>,
             after: Option<&Node>,
-            path: &mut Vec<String>,
+            path: &mut Vec<Shared<String>>,
             out: &mut Vec<Change>,
             totals: (u64, u64),
             mode: ComparisonMode,
         ) {
             let name = after.or(before).unwrap().name.clone();
-            path.push(name);
+            path.push(name.into());
             let b = before.map_or(0, |n| n.samples);
             let a = after.map_or(0, |n| n.samples);
             out.push(Change {
@@ -599,7 +609,7 @@ impl Profile {
         fn walk(
             before: Option<&Node>,
             after: Option<&Node>,
-            path: &mut Vec<String>,
+            path: &mut Vec<Shared<String>>,
             out: &mut Vec<Change>,
             totals: (u64, u64),
             mode: ComparisonMode,

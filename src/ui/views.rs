@@ -3957,7 +3957,12 @@ fn flame_difference(
         if cell.folded == 0 {
             let delta = comparison
                 .changes
-                .binary_search_by(|c| c.path.cmp(&path))
+                .binary_search_by(|c| {
+                    c.path
+                        .iter()
+                        .map(|s| s.as_str())
+                        .cmp(path.iter().map(String::as_str))
+                })
                 .ok()
                 .map_or(0., |i| comparison.changes[i].delta);
             cell.delta = Some(delta);
@@ -4010,8 +4015,8 @@ fn flame_difference(
             .map(|id| {
                 current
                     .frames
-                    .get(id)
-                    .or_else(|| baseline.frames.get(id))
+                    .get(id.as_str())
+                    .or_else(|| baseline.frames.get(id.as_str()))
                     .map_or(id.as_str(), |f| f.display.as_str())
             })
             .collect::<Vec<_>>()

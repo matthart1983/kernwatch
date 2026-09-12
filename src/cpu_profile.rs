@@ -30,6 +30,7 @@ fn err(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
 }
 pub struct Sampler {
+    last_scan: Option<std::time::Instant>,
     counts: PerCpuHashMap<MapData, Key, u64>,
     execs: BpfHashMap<MapData, u32, u64>,
     stats: PerCpuArray<MapData, u64>,
@@ -61,6 +62,7 @@ impl Sampler {
             ))
         };
         let mut sampler = Self {
+            last_scan: None,
             execs: BpfHashMap::try_from(
                 bpf.take_map("profile_execs")
                     .ok_or_else(|| err("missing exec generations"))?,
@@ -170,6 +172,19 @@ impl Sampler {
                 profile.metadata.cpus = self.links.keys().copied().collect();
             }
         }
+        // Counts are cumulative and never removed while attached. Four reads/s
+        // preserves every sample while avoiding 16k map syscalls at each 20 ms
+        // wakeup on a full map. Lifecycle/hotplug checks above remain immediate;
+        // after detach the final drain always bypasses the publication cadence.
+        let now = std::time::Instant::now();
+        if !self.finished
+            && self
+                .last_scan
+                .is_some_and(|at| now.duration_since(at) < std::time::Duration::from_millis(250))
+        {
+            return Ok(());
+        }
+        self.last_scan = Some(now);
         profile.metadata.kind = Kind::Cpu;
         profile.quality.attempted = self.stats.get(&0, 0).map_err(err)?.iter().sum();
         profile.quality.map_failures = self.stats.get(&1, 0).map_err(err)?.iter().sum();

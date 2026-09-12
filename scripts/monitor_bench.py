@@ -50,6 +50,7 @@ def run(binary, seconds, warmup, mode):
             args.append('--demo')
         child = subprocess.Popen(args, stdin=slave, stdout=slave, stderr=slave, cwd=work,
                                  env={**os.environ, 'XDG_STATE_HOME': work, 'TERM': 'xterm-256color'})
+        print(json.dumps({'started_binary': str(binary), 'pid': child.pid, 'seconds': seconds}), flush=True)
         traffic = 0
 
         def drain(duration):
@@ -71,6 +72,8 @@ def run(binary, seconds, warmup, mode):
             while time.monotonic() - start < seconds:
                 drain(min(1, seconds - (time.monotonic() - start)))
                 samples.append({'seconds': round(time.monotonic() - start, 3), **sample(child.pid)})
+                if len(samples) % 60 == 0:
+                    print(json.dumps({'progress_seconds': samples[-1]['seconds'], 'rss_kib': samples[-1]['rss_kib'], 'cpu_seconds': samples[-1]['cpu_seconds']}), flush=True)
             elapsed = time.monotonic() - start
             after = samples[-1]
             per_thread = {}

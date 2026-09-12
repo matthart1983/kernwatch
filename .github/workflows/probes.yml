@@ -42,8 +42,10 @@ jobs:
       - name: Build frame-pointer workload and sampler
         run: |
           rustup toolchain install 1.98.0 --profile minimal
-          RUSTFLAGS='-C force-frame-pointers=yes' cargo +1.98.0 build --locked --release --example cpu_smoke --example map_scan_bench
+          RUSTFLAGS='-C force-frame-pointers=yes' cargo +1.98.0 build --locked --release --example cpu_smoke --example map_scan_bench --example observer_workload --bin kernwatch
       - name: Measure populated count-map scans
         run: sudo target/release/examples/map_scan_bench
       - name: Load, attach, sample and detach on the runner kernel
         run: sudo target/release/examples/cpu_smoke
+      - name: Full application capture throughput and scope
+        run: sudo python3 scripts/profile_overhead.py
