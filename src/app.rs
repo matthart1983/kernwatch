@@ -258,7 +258,11 @@ impl App {
         // older half instead of discarding it trades resolution for reach: the
         // recent past stays per-second, the distant past coarsens, and ten
         // minutes remains seekable. Dropping the far end instead would lose it.
-        const BUDGET: usize = 128 * 1024 * 1024;
+        // Reach no longer depends on this budget, because thinning buys span
+        // with resolution rather than with bytes. A monitor spending an eighth
+        // of a gigabyte on scrollback is worse than one that seeks a little
+        // more coarsely.
+        const BUDGET: usize = 48 * 1024 * 1024;
         while self.timeline_bytes > BUDGET && self.timeline_frames.len() > Self::MIN_FULL_RESOLUTION
         {
             let half = self.timeline_frames.len() / 2;
