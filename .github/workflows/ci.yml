@@ -26,22 +26,3 @@ jobs:
         run: python3 scripts/pty_smoke.py
       - name: Guided demo smoke test
         run: python3 scripts/demo_smoke.py
-  # The viewer platforms render different panels than Linux does, so a test
-  # written against the Linux wording passes the job above and only fails in
-  # the release matrix, after a tag has been pushed. Run them here instead.
-  portable:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-15, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Install Rust
-        shell: bash
-        run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
-      - name: Test
-        shell: bash
-        run: cargo test --locked

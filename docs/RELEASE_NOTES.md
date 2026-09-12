@@ -12,6 +12,8 @@ Reworks how history is drawn and how detail panels are read.
 
 Terminal frames are bracketed with synchronized-update commands on supporting terminals, and the Linux collector schedules against a one-second deadline instead of oversleeping in 50ms steps.
 
+**macOS and Windows are dropped.** The two viewer targets built the demo and the replay of Linux recordings and nothing else: no kernel telemetry, no host controls. They are no longer built, tested or published, and the crate no longer compiles off Linux. 0.2.0 assets stay available for anyone still replaying recordings on those platforms. The release matrix is now the four Linux assets below.
+
 ## kernwatch v0.2.0
 
 Adds every target from netwatch's release matrix, with explicit platform scope.

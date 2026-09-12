@@ -199,7 +199,6 @@ pub fn stamp() -> u128 {
         .as_nanos()
 }
 
-#[cfg(target_os = "linux")]
 fn publish_directory(staging: &Path, path: &Path) -> io::Result<()> {
     std::fs::File::open(staging)?.sync_all()?;
     let from =
@@ -222,32 +221,5 @@ fn publish_directory(staging: &Path, path: &Path) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
 
-    Ok(())
-}
-#[cfg(target_os = "macos")]
-fn publish_directory(staging: &Path, path: &Path) -> io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let from = std::ffi::CString::new(staging.as_os_str().as_bytes())?;
-    let to = std::ffi::CString::new(path.as_os_str().as_bytes())?;
-    File::open(staging)?.sync_all()?;
-    // SAFETY: both paths are valid NUL-terminated strings; RENAME_EXCL forbids replacement.
-    if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-#[cfg(windows)]
-fn publish_directory(staging: &Path, path: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32;
-    }
-    let from: Vec<_> = staging.as_os_str().encode_wide().chain(Some(0)).collect();
-    let to: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: terminated UTF-16 paths; WRITE_THROUGH is set and REPLACE_EXISTING is absent.
-    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 8) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
     Ok(())
 }

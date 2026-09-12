@@ -1,4 +1,3 @@
-#[cfg(target_os = "linux")]
 mod linux {
     use kernwatch::probes::Probes;
     use std::time::{Duration, Instant};
@@ -268,11 +267,6 @@ mod linux {
         std::process::exit(if failed { 1 } else { 0 });
     }
 }
-#[cfg(target_os = "linux")]
 fn main() {
     linux::main()
-}
-#[cfg(not(target_os = "linux"))]
-fn main() {
-    eprintln!("This probe example requires Linux");
 }

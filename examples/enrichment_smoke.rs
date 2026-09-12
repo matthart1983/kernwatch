@@ -1,4 +1,3 @@
-#[cfg(target_os = "linux")]
 mod linux {
     //! Read-only host integration audit; optional permission failures are recorded explicitly.
     pub fn main() {
@@ -38,11 +37,6 @@ mod linux {
         );
     }
 }
-#[cfg(target_os = "linux")]
 fn main() {
     linux::main()
-}
-#[cfg(not(target_os = "linux"))]
-fn main() {
-    eprintln!("This probe example requires Linux");
 }

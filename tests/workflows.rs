@@ -1,4 +1,3 @@
-#![cfg(target_os = "linux")]
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use kernwatch::{app::App, domain::*, model, recording};
 fn key(a: &mut App, k: KeyCode) {

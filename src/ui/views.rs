@@ -1732,8 +1732,6 @@ fn syscall_empty(f: &mut Frame, r: Rect, a: &App) {
     lines.push(String::new());
     if a.replay.is_some() {
         lines.push("This recording contains no syscall rows. Open a recording made during syscall capture.".into());
-    } else if !cfg!(target_os = "linux") {
-        lines.push("Live capture requires Linux. Use --demo or replay a Linux recording.".into());
     } else if !a.snapshot.demo {
         lines.extend([
             "Press l to capture all visible system syscalls for 30 seconds.".into(),

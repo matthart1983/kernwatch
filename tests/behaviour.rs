@@ -77,7 +77,6 @@ fn cpu_fixture_balances_and_overhead_arithmetic() {
     }
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn trace_hydration_uses_named_quantiles_and_task_identity() {
     let mut s = model::demo();
@@ -166,7 +165,6 @@ fn scenarios_reconcile_cpu_and_group_runtime_at_shared_times() {
     }
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn trace_loss_clears_current_typed_quantiles() {
     let mut s = model::demo();

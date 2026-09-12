@@ -8,8 +8,7 @@ import sys
 import tempfile
 
 target = sys.argv[1]
-windows = 'windows' in target
-exe = 'kernwatch.exe' if windows else 'kernwatch'
+exe = 'kernwatch'
 binary = (Path('target') / target / 'release' / exe).resolve()
 Path('target/release').mkdir(exist_ok=True)
 shutil.copy2(binary, Path('target/release') / exe)
@@ -24,9 +23,6 @@ with tempfile.TemporaryDirectory(prefix='kernwatch-release-') as work:
     subprocess.run(['cargo', 'run', '--locked', '--target', target, '--example', 'record_fixture', '--', str(recording)], check=True)
     replay = json.loads(run('--replay', str(recording), '--at', '1000', '--snapshot'))
     assert replay['demo']
-    if 'linux' not in target:
-        result = subprocess.run([str(binary), '--snapshot'], cwd=work, env=env, capture_output=True, text=True, encoding="utf-8")
-        assert result.returncode != 0 and 'Live monitoring requires Linux' in result.stderr
     if 'musl' in target:
         assert 'INTERP' not in subprocess.check_output(['readelf', '-l', str(binary)], text=True, encoding="utf-8")
         assert 'NEEDED' not in subprocess.check_output(['readelf', '-d', str(binary)], text=True, encoding="utf-8")

@@ -1,4 +1,3 @@
-#[cfg(target_os = "linux")]
 fn main() {
     use kernwatch::{app::App, domain::*, model, probes::Probes, ui};
     use ratatui::{backend::TestBackend, Terminal};
@@ -63,8 +62,4 @@ fn main() {
         a.rows()[index][0]
     );
     assert_eq!(p.correlator.lost, 0);
-}
-#[cfg(not(target_os = "linux"))]
-fn main() {
-    eprintln!("Linux syscall capture validation only");
 }

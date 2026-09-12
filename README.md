@@ -19,13 +19,7 @@ kernwatch is a Rust + Ratatui monitor for investigating CPU contention, task sch
 - **Inspect deeper metadata:** optional systemd properties/drop-ins, module file metadata, SMART health, journal records, and BPF program/link information.
 - **Review changes before applying:** supported task, IRQ/RPS, and cgroup controls use explicit previews, target identity checks, readback, and rollback journals.
 
-| Platform | Architectures | Supported modes |
-|---|---|---|
-| Linux | x86-64, ARM64; glibc and static musl | Live counters, optional eBPF, demo, recording and replay |
-| macOS | Intel x86-64, Apple Silicon ARM64 | Demo, Linux recording replay and report export |
-| Windows | x86-64 | Demo, Linux recording replay and report export |
-
-macOS and Windows do not collect native kernel telemetry or apply host controls. Their launch commands require `--demo-tour`, `--demo` or `--replay FILE`.
+kernwatch is Linux-only. It runs on x86-64 and ARM64, as glibc or static musl builds, and supports live counters, optional eBPF, demo, recording and replay. The macOS and Windows demo/replay viewers were removed in 0.3.0; they collected no kernel telemetry and applied no host controls.
 
 kernwatch is under active development. The [gap audit](docs/GAPS.md) and [requirement ledger](docs/COMPLETION.md) distinguish implemented features, environment restrictions, and remaining work.
 
@@ -45,7 +39,7 @@ Demo mode needs no administrator privileges, starts no host probes and does not 
 
 ### Download a binary
 
-Get prebuilt binaries from [GitHub Releases](https://github.com/matthart1983/kernwatch/releases/latest). Linux builds are available for x86-64 and ARM64, with glibc and static musl variants. Static musl builds are recommended for portability. macOS (Intel and Apple Silicon) and Windows x86-64 builds support demo and replay of Linux recordings. Downloads are public.
+Get prebuilt binaries from [GitHub Releases](https://github.com/matthart1983/kernwatch/releases/latest). Linux builds are available for x86-64 and ARM64, with glibc and static musl variants. Static musl builds are recommended for portability. Downloads are public.
 
 With GitHub CLI authenticated:
 
@@ -62,7 +56,7 @@ Archives include the executable, license and README. Static linking removes the 
 
 ### Build from source
 
-Requirements: **Linux x86-64 or ARM64** (live monitoring), or **macOS/Windows** (demo and replay), **Rust 1.98 or newer**, and a C linker. Internet access is needed for the first dependency download.
+Requirements: **Linux x86-64 or ARM64**, **Rust 1.98 or newer**, and a C linker. Internet access is needed for the first dependency download.
 
 Clone the repository and build:
 
