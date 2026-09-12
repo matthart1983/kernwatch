@@ -109,7 +109,7 @@ Use **160 columns** for the full dashboard. Compact layouts work at **80×24**, 
 | `b` | eBPF | Programs, maps, links, runtime counters, and capture overhead |
 | `m` | Dmesg | Kernel/journal events and source health |
 | `d` | Diagnose | Evidence, hypotheses, action previews, and verification |
-| `F` | Flame | Folded stacks from a capture, as a zoomable icicle |
+| `F` | [Flame](docs/FLAME_GRAPHS.md) | CPU/syscall stack capture, zoomable icicles, and baseline comparison |
 
 <details>
 <summary>More screenshots</summary>

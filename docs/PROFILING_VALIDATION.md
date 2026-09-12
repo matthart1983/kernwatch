@@ -7,10 +7,16 @@ follow-up designs in the roadmap.
 
 ## Local checks
 
-- Rust unit and integration suite: 165 tests passed, including old recordings,
+- Rust unit and integration suite: 166 tests passed, including old recordings,
   profile quality denominators, comparison arithmetic, added/removed paths,
   capture controls, baseline reload and report-manifest coverage.
 - Clippy with all targets and warnings denied: passed.
+- Native release build, release smoke, PTY keyboard/resize/record/export and
+  SIGTERM cleanup, and guided demo smoke: passed.
+- Release archive checks confirmed the binary, BPF provenance and dependency
+  licenses are packaged together.
+- A deliberately changed C source with unchanged objects was rejected by the
+  probe verifier.
 - Probe verification with Fedora Clang 22.1.8-4.fc44: both x86-64 and aarch64
   objects rebuilt identically from another directory. Source and object hashes
   are emitted in `dist/probes/provenance.json`.
@@ -26,7 +32,10 @@ not changed. The workload and sampler were built with frame pointers enabled.
 `examples/cpu_smoke.rs` verified nonzero samples from syscall-free loops at
 49 and 99 Hz; existing and newly spawned workers; process and thread isolation;
 system-wide inclusion of an unrelated process; visible bounded-map pressure;
-target-exit handling; and repeated final reads without double counting.
+target-exit handling; full-depth stacks; CPU offline/online changes; restricted
+kernel symbols; and repeated final reads without double counting. The existing
+scheduler, IRQ, block, syscall and combined-probe smoke suite also passed in a
+separate disposable guest after the symbol-cache regression was corrected.
 A separate `perf record -e cpu-clock -F 49 --call-graph fp` capture identified
 the same busy-loop function as the dominant work (100% in its reference report).
 Guest output and assertions are recorded in `tests/vm/cpu.log` locally.
@@ -54,10 +63,14 @@ symbol tests are gated by the init program's disposable-guest environment marker
 
 ## Platform gates
 
-The reusable probe workflow rebuilds both objects and performs privileged live
-checks on Ubuntu x86-64 and ARM64 runners. These remote checks must pass for the
-actual implementation commit before claiming verification on ARM64. Local BPF
-cross-compilation alone does not prove verifier acceptance on that architecture.
+The reusable probe workflow rebuilt both objects and passed privileged live
+checks on Ubuntu x86-64 and ARM64 runners for implementation commit
+`df3fc0e3c59ee6afc86cedc5a26437d73867ef5a`. The complete
+[CI run](https://github.com/matthart1983/kernwatch/actions/runs/34677109649)
+includes formatting, Clippy, unit/integration tests, release build and terminal
+smoke tests. Kernel-stack acceptance uses a sustained `/dev/zero` workload,
+not incidental kernel activity during a user-only loop. Map-pressure acceptance
+requires a nonzero explicit insertion-loss count.
 
 The current local validation does not establish reliable cross-build function
 matching, DWARF/SFrame coverage, complete mapping-event history, or production
