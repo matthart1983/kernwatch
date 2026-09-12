@@ -6,6 +6,8 @@ pub mod ui;
 
 pub mod domain;
 pub mod fixture;
+pub mod flame;
+pub mod symbols;
 
 pub mod recording;
 

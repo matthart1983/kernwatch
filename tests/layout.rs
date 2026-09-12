@@ -97,20 +97,23 @@ fn every_focus_expands_at_compact_size() {
 
 #[test]
 fn reference_buffers_match_reviewed_captures() {
-    for (i, name) in [
-        "dense",
-        "overview",
-        "tasks",
-        "scheduler",
-        "memory",
-        "block",
-        "syscalls",
-        "irq",
-        "cgroups",
-        "modules",
-        "ebpf",
-        "dmesg",
-        "diagnose",
+    // The view each capture belongs to is named rather than derived from its
+    // position, so adding a view cannot silently re-point an existing capture.
+    for (i, (name, tab)) in [
+        ("dense", 12),
+        ("overview", 0),
+        ("tasks", 1),
+        ("scheduler", 2),
+        ("memory", 3),
+        ("block", 4),
+        ("syscalls", 5),
+        ("irq", 6),
+        ("cgroups", 7),
+        ("modules", 8),
+        ("ebpf", 9),
+        ("dmesg", 10),
+        ("diagnose", 11),
+        ("flame", 13),
     ]
     .iter()
     .enumerate()
@@ -122,7 +125,7 @@ fn reference_buffers_match_reviewed_captures() {
         let w = expected["width"].as_u64().unwrap() as u16;
         let h = expected["height"].as_u64().unwrap() as u16;
         let mut a = App::new(model::demo());
-        a.switch(if i == 0 { 12 } else { i - 1 });
+        a.switch(*tab);
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal.draw(|f| ui::draw(f, &a)).unwrap();
         let cells = expected["cells"].as_array().unwrap();

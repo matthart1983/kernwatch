@@ -233,6 +233,9 @@ pub struct Telemetry {
     pub details: BTreeMap<String, Vec<(String, String)>>,
     pub capabilities: BTreeMap<String, Quality>,
     pub trace_drops: u64,
+    /// Folded stacks from the most recent capture that collected any.
+    #[serde(default)]
+    pub profile: crate::flame::Profile,
 }
 impl Telemetry {
     pub fn concern(&self, family: &str) -> Option<&Issue> {

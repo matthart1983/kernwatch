@@ -7,12 +7,63 @@ fn fields(items: &[(&str, &str)]) -> Vec<(String, String)> {
         .map(|(a, b)| (a.to_string(), b.to_string()))
         .collect()
 }
+/// A synthetic profile for the demo: the Envoy worker's stacks during the
+/// scheduling incident. Weights are made up, like the rest of the fixture, and
+/// the tab marks itself as demo data.
+pub fn profile() -> crate::flame::Profile {
+    let mut p = crate::flame::Profile::new("demo fixture · synthetic stacks");
+    for (stack, samples) in [
+        (
+            "envoy_main;worker_loop;epoll_wait;__x64_sys_epoll_wait;schedule",
+            480,
+        ),
+        ("envoy_main;worker_loop;on_readable;http_parse;memchr", 260),
+        (
+            "envoy_main;worker_loop;on_readable;http_parse;header_map_insert;hash_bytes",
+            140,
+        ),
+        (
+            "envoy_main;worker_loop;on_readable;ssl_read;aes_gcm_decrypt;aesni_ctr32",
+            220,
+        ),
+        (
+            "envoy_main;worker_loop;on_writable;ssl_write;aes_gcm_encrypt;aesni_ctr32",
+            180,
+        ),
+        (
+            "envoy_main;worker_loop;upstream_connect;__x64_sys_connect;tcp_v4_connect",
+            90,
+        ),
+        ("envoy_main;worker_loop;stats_flush;histogram_merge", 40),
+        (
+            "envoy_main;config_update;xds_decode;protobuf_parse;arena_alloc",
+            30,
+        ),
+        ("envoy_main;worker_loop;on_readable;0x7f2c4a118b30", 24),
+        ("envoy_main;worker_loop;timer_expire", 12),
+        ("envoy_main;worker_loop;conn_close", 6),
+        ("envoy_main;worker_loop;dns_resolve", 3),
+        ("envoy_main;worker_loop;log_flush", 2),
+        ("envoy_main;worker_loop;admin_handler", 1),
+    ] {
+        p.add(
+            &stack.split(';').map(str::to_owned).collect::<Vec<_>>(),
+            samples,
+        );
+    }
+    // Stacks whose frame pointer chain ended immediately: the panel reports
+    // the share rather than pretending the program is one call deep.
+    p.add(&["envoy_main".to_string()], 96);
+    p.sort();
+    p
+}
 pub fn incident() -> Telemetry {
     let mut t = Telemetry {
         boot_id: "demo-boot".into(),
         hostname: "kw-demo".into(),
         kernel: "6.12.9".into(),
         at_ms: NOW,
+        profile: profile(),
         ..Default::default()
     };
     for (id, busy) in [41., 37., 44., 98., 29., 33., 40., 31.]

@@ -103,8 +103,9 @@ fn export_manifest_matches_every_payload() {
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path.join("manifest.json")).unwrap()).unwrap();
     let entries = manifest["files"].as_array().unwrap();
-    assert_eq!(entries.len(), 7);
+    assert_eq!(entries.len(), 8);
     assert!(entries.iter().any(|e| e["file"] == "actions.json"));
+    assert!(entries.iter().any(|e| e["file"] == "stacks.folded"));
     for entry in entries {
         let file = path.join(entry["file"].as_str().unwrap());
         assert_eq!(
@@ -112,7 +113,7 @@ fn export_manifest_matches_every_payload() {
             entry["bytes"].as_u64().unwrap()
         );
     }
-    assert_eq!(std::fs::read_dir(&path).unwrap().count(), 8);
+    assert_eq!(std::fs::read_dir(&path).unwrap().count(), 9);
     std::fs::remove_dir_all(path).unwrap();
 }
 #[test]

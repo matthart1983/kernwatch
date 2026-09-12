@@ -2,7 +2,7 @@
 
 **Linux kernel observability, in your terminal.**
 
-kernwatch is a Rust + Ratatui monitor for investigating CPU contention, task scheduling, memory pressure, block I/O, interrupts, cgroups, kernel modules, and eBPF activity. Thirteen connected views bring live counters, bounded tracing, timelines, and incident evidence into one keyboard-driven interface.
+kernwatch is a Rust + Ratatui monitor for investigating CPU contention, task scheduling, memory pressure, block I/O, interrupts, cgroups, kernel modules, and eBPF activity. Fourteen connected views bring live counters, bounded tracing, timelines, stack profiles, and incident evidence into one keyboard-driven interface.
 
 ![Guided kernwatch demo: Dense, Tasks, Scheduler, IRQ, Memory, Block, Cgroups, eBPF, and Diagnose](screenshots/demo/kernwatch-demo.gif)
 
@@ -109,6 +109,7 @@ Use **160 columns** for the full dashboard. Compact layouts work at **80×24**, 
 | `b` | eBPF | Programs, maps, links, runtime counters, and capture overhead |
 | `m` | Dmesg | Kernel/journal events and source health |
 | `d` | Diagnose | Evidence, hypotheses, action previews, and verification |
+| `F` | Flame | Folded stacks from a capture, as a zoomable icicle |
 
 <details>
 <summary>More screenshots</summary>

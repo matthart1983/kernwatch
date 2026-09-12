@@ -50,6 +50,11 @@ pub struct Probes {
     pub device_ms: BTreeMap<u64, Vec<f64>>,
     last_loss: u64,
     pub mode: String,
+    /// Thread the capture is scoped to; 0 when unscoped.
+    pub target_pid: u32,
+    /// Folded stacks from this capture, resolved as they arrive.
+    pub profile: crate::flame::Profile,
+    symbols: crate::symbols::Symbols,
     pub start_ns: Option<u64>,
     pub last_ns: u64,
     pub processed: u64,
@@ -169,6 +174,11 @@ impl Probes {
             p.attach(attach).map_err(err)?;
             owned_attachments.insert(p.info().map_err(err)?.id().to_string(), attach.to_string());
         }
+        let mut symbols = crate::symbols::Symbols::default();
+        if capture_stack != 0 {
+            symbols.load_kernel();
+        }
+        let stack_source = format!("{mode} · TID {pid} · user stacks");
         let stacks = StackTraceMap::try_from(
             bpf.take_map("stacks")
                 .ok_or_else(|| err("missing stack map"))?,
@@ -204,6 +214,9 @@ impl Probes {
             device_ms: BTreeMap::new(),
             last_loss: 0,
             mode: mode.into(),
+            target_pid: pid,
+            profile: crate::flame::Profile::new(&stack_source),
+            symbols,
             start_ns: None,
             last_ns: 0,
             processed: 0,
@@ -255,19 +268,22 @@ impl Probes {
                     } else if (e.pad as i32) < 0 {
                         format!(" user_stack_errno={}", -(e.pad as i32))
                     } else {
-                        self.stacks
-                            .get(&e.pad, 0)
-                            .map(|s| {
-                                format!(
-                                    " user_stack={}",
-                                    s.frames()
-                                        .iter()
-                                        .map(|f| format!("0x{:x}", f.ip))
-                                        .collect::<Vec<_>>()
-                                        .join("←")
-                                )
-                            })
-                            .unwrap_or_else(|e| format!(" user_stack_unavailable={e}"))
+                        match self.stacks.get(&e.pad, 0) {
+                            Ok(trace) => {
+                                // Outermost frame first, which is the order a
+                                // profile folds; the kernel returns the
+                                // innermost caller first.
+                                let mut frames = trace
+                                    .frames()
+                                    .iter()
+                                    .map(|f| self.symbols.frame(e.pid, f.ip, false))
+                                    .collect::<Vec<_>>();
+                                frames.reverse();
+                                self.profile.add(&frames, 1);
+                                format!(" user_stack={}", frames.join(";"))
+                            }
+                            Err(error) => format!(" user_stack_unavailable={error}"),
+                        }
                     };
                     (
                         "sys_enter",
@@ -343,6 +359,11 @@ impl Probes {
     }
     pub fn apply(&self, t: &mut Telemetry) {
         self.correlator.apply(t);
+        if !self.profile.is_empty() {
+            let mut profile = self.profile.clone();
+            profile.sort();
+            t.profile = profile;
+        }
         t.details.insert(
             "probe.capture_id".into(),
             vec![("id".into(), self.capture_id.clone())],

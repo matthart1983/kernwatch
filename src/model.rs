@@ -13,7 +13,7 @@ pub const SYSCALL_COLUMNS: [&str; 10] = [
     "verdict",
 ];
 
-pub const TABS: [(&str, char); 13] = [
+pub const TABS: [(&str, char); 14] = [
     ("Overview", '1'),
     ("Tasks", '2'),
     ("Scheduler", '3'),
@@ -27,6 +27,7 @@ pub const TABS: [(&str, char); 13] = [
     ("Dmesg", 'm'),
     ("Diagnose", 'd'),
     ("Dense", '0'),
+    ("Flame", 'F'),
 ];
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct View {
@@ -68,7 +69,7 @@ pub fn demo() -> Snapshot {
         mem_used: 20070,
         mem_total: 32768,
         load: "9.8 / 8.1 / 6.4".into(),
-        views: vec![View::default(); 13],
+        views: vec![View::default(); 14],
         findings: vec![
             "Observed: CPU3 NET_RX 91%; Envoy wakeup p99 18 ms.".into(),
             "Observed: one outstanding FLUSH aged 4.1 s; completed I/O p99 1.9 ms.".into(),

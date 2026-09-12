@@ -143,7 +143,7 @@ fn chrome(f: &mut Frame, area: Rect, a: &App) {
     line(f, Rect::new(area.x, area.y, 12, 1), "◉ kernwatch", CYAN);
     let mut tabs = Vec::new();
     let mut used = 0;
-    let order = [12, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+    let order = [12, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 10, 11];
     let position = order.iter().position(|i| *i == a.tab).unwrap_or(0);
     let start = if nav_w < 125 {
         position.saturating_sub(2)

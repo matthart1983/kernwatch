@@ -903,3 +903,65 @@ mod insufficient_history_tests {
         }
     }
 }
+
+/// Stable tint for a frame, so the same function keeps its color between
+/// captures and neighbouring frames stay distinguishable.
+fn frame_tint(name: &str) -> Color {
+    let hash = name
+        .bytes()
+        .fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
+    [CYAN, PURPLE, GOLD, GREEN, Color::LightBlue][hash as usize % 5]
+}
+
+/// Text color that stays legible on `background`, whatever tint it carries.
+fn readable_on(background: Color) -> Color {
+    match background {
+        Color::Rgb(r, g, b) => {
+            // Rec. 601 luma is close enough to pick a side, and avoids light
+            // text on the brighter tints.
+            let luma = 0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64;
+            if luma > 110. {
+                BG
+            } else {
+                FG
+            }
+        }
+        _ => FG,
+    }
+}
+
+/// Draw a laid-out icicle. Every cell is exactly as wide as its share of the
+/// samples; nothing is widened to fit a label, so a frame whose name does not
+/// fit is shortened rather than given room it did not earn.
+pub fn icicle(f: &mut Frame, area: Rect, cells: &[crate::flame::Placed], selected: usize) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    for (index, cell) in cells.iter().enumerate() {
+        let y = area.y + cell.depth;
+        if y >= area.bottom() {
+            continue;
+        }
+        let x = area.x + cell.x;
+        let width = cell.width.min(area.right().saturating_sub(x));
+        if width == 0 {
+            continue;
+        }
+        let chosen = index == selected;
+        let tint = frame_tint(&cell.name);
+        // Labels sit on the tint, so it stays dark enough to read light text
+        // on, and selection brightens the same hue rather than recoloring it.
+        let background = if chosen {
+            lerp(BG, tint, 0.55)
+        } else {
+            lerp(BG, tint, 0.18 + 0.05 * (cell.depth % 4) as f64)
+        };
+        let label: Vec<char> = ellipsize(&cell.name, width as usize).chars().collect();
+        for offset in 0..width {
+            f.buffer_mut()
+                .get_mut(x + offset, y)
+                .set_char(label.get(offset as usize).copied().unwrap_or(' '))
+                .set_style(Style::default().fg(readable_on(background)).bg(background));
+        }
+    }
+}

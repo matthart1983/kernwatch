@@ -32,6 +32,8 @@ pub struct App {
     pub metric: usize,
     pub marked_modules: std::collections::BTreeSet<String>,
     pub grouping: usize,
+    /// Frames zoomed into on the Flame view, outermost first.
+    pub flame_zoom: Vec<String>,
     demo_host: crate::actions::DemoHost,
     timeline_frames: VecDeque<(usize, Snapshot)>,
     timeline_bytes: usize,
@@ -87,6 +89,7 @@ impl App {
             metric: 0,
             marked_modules: Default::default(),
             grouping: 0,
+            flame_zoom: Vec::new(),
             demo_host: Default::default(),
             timeline_frames: VecDeque::new(),
             timeline_bytes: 0,
@@ -148,7 +151,7 @@ impl App {
         }
     }
     pub fn panel_count(&self) -> usize {
-        [4, 4, 3, 4, 3, 3, 3, 4, 3, 3, 3, 4, 8][self.tab]
+        [4, 4, 3, 4, 3, 3, 3, 4, 3, 3, 3, 4, 8, 2][self.tab]
     }
     pub fn cursor(&self) -> u64 {
         self.time_cursor.unwrap_or(self.snapshot.telemetry.at_ms)
@@ -822,7 +825,7 @@ impl App {
         rows
     }
     pub fn switch(&mut self, t: usize) {
-        self.tab = t.min(12);
+        self.tab = t.min(13);
         self.selected = 0;
         self.scroll = 0;
         self.detail = false;
@@ -832,6 +835,7 @@ impl App {
         self.filter.clear();
         self.mode = 0;
         self.scope_cpu = None;
+        self.flame_zoom.clear();
         if t == 10 {
             self.selected = self.visible_events().len().saturating_sub(1);
         }
@@ -973,6 +977,11 @@ impl App {
         self.switch(t);
     }
     fn back(&mut self) {
+        if self.tab == 13 && !self.flame_zoom.is_empty() {
+            self.flame_zoom.pop();
+            self.selected = 0;
+            return;
+        }
         if self.detail {
             self.detail = false;
             self.capabilities_view = false;
@@ -1144,6 +1153,7 @@ impl App {
             }
             KeyCode::End => self.selected = self.row_count().saturating_sub(1),
             KeyCode::Enter => match self.tab {
+                13 => self.zoom_flame(),
                 0 | 12 => self.drill(match self.focus {
                     0 => 2,
                     1 => 3,
@@ -1508,7 +1518,36 @@ impl App {
     fn table_focus(&self) -> bool {
         self.focus == 0 || (self.tab == 12 && self.focus == 6) || (self.tab == 0 && self.focus == 2)
     }
+    /// The zoomed frame's children: what selection moves between.
+    pub fn flame_children(&self) -> usize {
+        self.snapshot
+            .telemetry
+            .profile
+            .root
+            .at(&self.flame_zoom)
+            .map(|node| node.children.len())
+            .unwrap_or(0)
+    }
+    /// Zoom into the selected child frame.
+    fn zoom_flame(&mut self) {
+        let Some(name) = self
+            .snapshot
+            .telemetry
+            .profile
+            .root
+            .at(&self.flame_zoom)
+            .and_then(|node| node.children.get(self.selected))
+            .map(|child| child.name.clone())
+        else {
+            return;
+        };
+        self.flame_zoom.push(name);
+        self.selected = 0;
+    }
     fn row_count(&self) -> usize {
+        if self.tab == 13 {
+            return self.flame_children();
+        }
         if self.tab == 3 && (self.focus == 3 || self.mode != 1) {
             self.memory_tasks().len()
         } else if self.tab == 3 && self.focus == 0 {

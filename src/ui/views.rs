@@ -510,6 +510,7 @@ pub fn draw(f: &mut Frame, r: Rect, a: &App) {
         9 => ebpf(f, r, a),
         10 => logs(f, r, a),
         11 => diagnose(f, r, a),
+        13 => flame(f, r, a),
         _ => {}
     }
 }
@@ -2515,6 +2516,10 @@ fn compact(f: &mut Frame, r: Rect, a: &App) {
         timeline(f, bands[2], a, 8);
         return;
     }
+    if a.tab == 13 {
+        flame(f, r, a);
+        return;
+    }
     let bands = vertical(r, &[Constraint::Min(8), Constraint::Length(6)]);
     if a.tab == 0 || a.tab == 12 {
         cpu_panel(f, bands[0], a, 1, true);
@@ -3316,5 +3321,141 @@ mod field_tests {
             !lines[3].trim().is_empty(),
             "the second line of a wrapped value should be rendered"
         );
+    }
+}
+
+/// The subtree currently in view, and the path that reached it.
+fn flame_root(a: &App) -> (&crate::flame::Node, Vec<String>) {
+    let profile = &t(a).profile;
+    let zoom = a.flame_zoom.clone();
+    match profile.root.at(&zoom) {
+        Some(node) => (node, zoom),
+        // A zoom that no longer matches the capture falls back to the whole
+        // profile rather than showing an empty panel.
+        None => (&profile.root, Vec::new()),
+    }
+}
+
+fn flame(f: &mut Frame, r: Rect, a: &App) {
+    let profile = &t(a).profile;
+    // The graph is as tall as the stacks are deep, so a shallow profile does
+    // not leave most of the panel blank and a deep one still gets the room.
+    let deepest = flame_root(a).0.depth();
+    let graph = (deepest + 3).clamp(8, r.height.saturating_sub(10).max(8));
+    let bands = vertical(
+        r,
+        &[
+            Constraint::Length(1),
+            Constraint::Length(graph),
+            Constraint::Min(6),
+        ],
+    );
+    line(
+        f,
+        bands[0],
+        format!(
+            " ↵ zoom frame · Esc widen · ↑↓ select    · e export folds the stacks{}",
+            if a.snapshot.demo {
+                " · demo fixture"
+            } else {
+                ""
+            }
+        ),
+        DIM,
+    );
+    let (root, zoom) = flame_root(a);
+    let subtitle = if profile.is_empty() {
+        "no stacks collected".to_string()
+    } else {
+        let mut parts = vec![format!("{} samples", root.samples)];
+        if let Some(share) = profile.shallow_share().filter(|s| *s > 0.) {
+            parts.push(format!("{share:.0}% truncated"));
+        }
+        if profile.unresolved > 0 {
+            parts.push(format!("{} unresolved", profile.unresolved));
+        }
+        parts.join(" · ")
+    };
+    let title = if zoom.is_empty() {
+        "stacks".to_string()
+    } else {
+        format!("stacks · {}", zoom.join(" › "))
+    };
+    let area = p(f, bands[1], a, 1, &title, &subtitle);
+    let cells = crate::flame::layout(root, area.width, area.height);
+    // Selection moves between the zoomed frame's children, so which cell is
+    // highlighted does not depend on how wide the terminal drew them.
+    let chosen = root.children.get(a.selected).map(|c| c.name.as_str());
+    let selected = chosen
+        .and_then(|name| {
+            cells
+                .cells
+                .iter()
+                .position(|c| c.depth == 1 && c.name == name)
+        })
+        .unwrap_or(usize::MAX);
+    if profile.is_empty() {
+        note(
+            f,
+            area,
+            &[
+                "No stacks have been collected.",
+                "",
+                "A profile needs a capture that records them:",
+                ": probe syscalls pid=TID seconds=30 stack",
+                "",
+                "Stack depth depends on frame pointers in the traced binaries.",
+                "Stacks that end too shallow to be a call path are counted, not repaired.",
+            ],
+        );
+    } else {
+        icicle(f, area, &cells.cells, selected);
+    }
+    let detail = p(f, bands[2], a, 2, "frame", "share of the zoomed subtree");
+    let mut fields = Vec::new();
+    if let Some(node) = root.children.get(a.selected) {
+        let share = node.samples as f64 / root.samples.max(1) as f64 * 100.;
+        fields.push(("frame".into(), node.name.clone()));
+        fields.push((
+            "samples".into(),
+            format!("{} · {share:.1}% of {}", node.samples, root.name),
+        ));
+        fields.push((
+            "in this frame".into(),
+            format!("{} not accounted for by callees", node.own()),
+        ));
+        fields.push(("called frames".into(), node.children.len().to_string()));
+        if selected == usize::MAX {
+            fields.push((
+                "drawn".into(),
+                "no; this frame is narrower than one column".into(),
+            ));
+        }
+    }
+    if cells.hidden > 0 {
+        fields.push((
+            "not drawn".into(),
+            format!(
+                "{} frames below one column, with no room for a stand-in",
+                cells.hidden
+            ),
+        ));
+    }
+    if !profile.source.is_empty() {
+        fields.push(("source".into(), profile.source.clone()));
+    }
+    if profile.shallow > 0 {
+        fields.push((
+            "shallow stacks".into(),
+            format!(
+                "{} of {} samples; frame pointers ended the walk early and are not reconstructed",
+                profile.shallow, profile.root.samples
+            ),
+        ));
+    }
+    if fields.is_empty() {
+        note(f, detail, &["Select a frame to inspect it."]);
+    } else {
+        fields_widget(f, detail, &fields, 0);
     }
 }

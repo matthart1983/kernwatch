@@ -79,13 +79,19 @@ pub fn read(path: &Path) -> io::Result<Vec<Snapshot>> {
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
             Err(e) => return Err(e),
         }
-        let s: Snapshot = serde_json::from_slice(&data)?;
-        if s.views.len() != 13 {
+        let mut s: Snapshot = serde_json::from_slice(&data)?;
+        // A recording made before a view existed is still replayable: the
+        // missing views stay empty rather than rejecting the file. A recording
+        // from a newer build carries views this one cannot render, and is
+        // refused rather than silently truncated.
+        if s.views.len() > crate::model::TABS.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "recording has invalid view schema",
             ));
         }
+        s.views
+            .resize_with(crate::model::TABS.len(), Default::default);
         total += size;
         frames.push(s);
     }
@@ -136,7 +142,7 @@ pub fn export(s: &Snapshot) -> io::Result<PathBuf> {
 }
 pub fn export_with_actions(s: &Snapshot, actions: &[crate::actions::Plan]) -> io::Result<PathBuf> {
     let path = PathBuf::from(format!("kernwatch-report-{}", stamp()));
-    let files = [
+    let files = vec![
         (
             "environment.json",
             serde_json::to_vec_pretty(
@@ -158,6 +164,12 @@ pub fn export_with_actions(s: &Snapshot, actions: &[crate::actions::Plan]) -> io
             serde_json::to_vec_pretty(&s.telemetry.series)?,
         ),
         ("report.md", report(s).into_bytes()),
+        // Folded stacks, the format flamegraph.pl and speedscope read. Always
+        // present so a report has one shape; empty when nothing was captured.
+        (
+            "stacks.folded",
+            s.telemetry.profile.folded().join("\n").into_bytes(),
+        ),
     ];
     let staging = PathBuf::from(format!(".kernwatch-report-{}.partial", stamp()));
     std::fs::create_dir(&staging)?;
