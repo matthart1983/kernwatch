@@ -958,7 +958,19 @@ pub fn icicle(
         // A searched-for frame is marked wherever it appears, which is the
         // question a profile is usually asked: where does this get called.
         let hit = !matching.is_empty() && cell.name.to_lowercase().contains(matching);
-        let tint = if hit { GOLD } else { frame_tint(&cell.name) };
+        let tint = if hit {
+            GOLD
+        } else if let Some(delta) = cell.delta {
+            if delta > 0. {
+                RED
+            } else if delta < 0. {
+                GREEN
+            } else {
+                DIM
+            }
+        } else {
+            frame_tint(&cell.name)
+        };
         // Labels sit on the tint, so it stays dark enough to read light text
         // on, and selection brightens the same hue rather than recoloring it.
         let background = if chosen || hit {
@@ -970,7 +982,9 @@ pub fn icicle(
         // be compared without selecting each in turn.
         let share = total.map(|t: u64| cell.samples as f64 / t.max(1) as f64 * 100.);
         let text = match share {
-            Some(share) if width as usize >= cell.name.chars().count() + 7 => {
+            Some(share)
+                if cell.delta.is_none() && width as usize >= cell.name.chars().count() + 7 =>
+            {
                 format!("{} {share:.1}%", cell.name)
             }
             _ => cell.name.clone(),

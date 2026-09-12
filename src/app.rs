@@ -48,6 +48,9 @@ pub enum FlameMove {
 }
 
 pub struct App {
+    pub flame_cpu: bool,
+    pub flame_baseline: Option<crate::flame::Profile>,
+    pub flame_compare: Option<crate::flame::ComparisonMode>,
     pub capabilities_view: bool,
     pub reviewing_action: bool,
     pub evidence_index: usize,
@@ -115,6 +118,9 @@ pub struct App {
 impl App {
     pub fn new(snapshot: Snapshot) -> Self {
         let mut a = Self {
+            flame_cpu: !snapshot.demo,
+            flame_baseline: None,
+            flame_compare: None,
             capabilities_view: false,
             reviewing_action: false,
             evidence_index: 0,
@@ -1211,6 +1217,32 @@ impl App {
                 }
             }
         }
+        if self.tab == 13 && self.flame_compare.is_some() {
+            match k.code {
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.scroll = self.scroll.saturating_add(1);
+                    return;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.scroll = self.scroll.saturating_sub(1);
+                    return;
+                }
+                KeyCode::PageDown => {
+                    self.scroll = self.scroll.saturating_add(10);
+                    return;
+                }
+                KeyCode::PageUp => {
+                    self.scroll = self.scroll.saturating_sub(10);
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.flame_compare = None;
+                    self.scroll = 0;
+                    return;
+                }
+                _ => {}
+            }
+        }
         match k.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') => self.help = true,
@@ -1675,6 +1707,19 @@ impl App {
             // P goes to the one place a thread can be chosen.
             // While the view offers threads it can start one itself; once it
             // shows a profile, P goes back to choosing a different thread.
+            KeyCode::Char('C') if self.tab == 13 => {
+                self.flame_cpu = !self.flame_cpu;
+                self.status = format!(
+                    "Next capture: {}",
+                    if self.flame_cpu {
+                        "CPU samples"
+                    } else {
+                        "syscall-entry stacks"
+                    }
+                );
+            }
+            KeyCode::Char('B') if self.tab == 13 => self.execute("profile-baseline"),
+            KeyCode::Char('D') if self.tab == 13 => self.execute("profile-diff share"),
             KeyCode::Char('P') if self.tab == 13 => {
                 if self.flame_picking() {
                     self.profile_selected_task();
@@ -1707,7 +1752,9 @@ impl App {
     /// profile to read.
     pub fn flame_picking(&self) -> bool {
         self.flame_choosing
-            || (self.flame_target.is_none() && self.snapshot.telemetry.profile.is_empty())
+            || (self.flame_target.is_none()
+                && self.snapshot.telemetry.profile.is_empty()
+                && self.snapshot.telemetry.profile.metadata.kind == crate::flame::Kind::Unknown)
     }
     /// Profile one thread by id, whatever view named it.
     pub fn profile_thread(&mut self, tid: u32) {
@@ -1733,7 +1780,7 @@ impl App {
                     })
             });
         match subject {
-            Some(subject) => self.start_profile(subject),
+            Some(subject) => self.start_profile_with(subject, false),
             None => self.status = format!("TID {tid} is no longer running"),
         }
     }
@@ -1767,19 +1814,34 @@ impl App {
     }
     /// Begin a bounded stack capture for one subject and show it filling.
     fn start_profile(&mut self, subject: FlameSubject) {
+        self.start_profile_with(subject, self.flame_cpu);
+    }
+    fn start_profile_with(&mut self, subject: FlameSubject, cpu: bool) {
         if self.snapshot.demo || self.replay.is_some() {
             self.status = "Stack capture requires live mode; this profile is fixture data".into();
             return;
         }
         let tid = subject.tid;
-        self.probe_request = Some(format!("syscalls pid={tid} seconds=30 stack"));
+        self.flame_compare = None;
+        self.flame_cpu = cpu;
+        self.probe_request = Some(if cpu {
+            if self.tab == 13 && self.mode != 1 {
+                format!("cpu tgid={} seconds=30 hz=49", subject.tgid)
+            } else {
+                format!("cpu pid={tid} seconds=30 hz=49")
+            }
+        } else {
+            format!("syscalls pid={tid} seconds=30 stack")
+        });
         let name = subject.name.clone();
         self.switch(13);
         self.flame_target = Some(subject.clone());
         self.flame_choosing = false;
         // Say which thread, because the probe attaches to one and a process
         // with many threads will not be captured whole.
-        self.status = if subject.threads > 1 {
+        self.status = if cpu {
+            format!("Profiling {name} TID {tid} CPU stacks for 30s at 49 Hz")
+        } else if subject.threads > 1 {
             format!(
                 "Profiling {name} thread {} (TID {tid}) for 30s, the busiest of {}",
                 subject.busiest, subject.threads
@@ -1802,7 +1864,7 @@ impl App {
             .telemetry
             .tasks
             .iter()
-            .filter(|x| !x.kernel_thread)
+            .filter(|x| self.flame_cpu || !x.kernel_thread)
             .filter(|x| {
                 query.is_empty()
                     || x.name.to_lowercase().contains(&query)
@@ -1865,7 +1927,7 @@ impl App {
             .telemetry
             .tasks
             .iter()
-            .filter(|x| !x.kernel_thread)
+            .filter(|x| self.flame_cpu || !x.kernel_thread)
             .map(|x| FlameSubject {
                 name: x.name.clone(),
                 tgid: x.tgid,
@@ -2021,6 +2083,57 @@ impl App {
         let cmd = parts.next().unwrap_or("");
         let arg = parts.next().unwrap_or("").trim();
         match cmd {
+            "profile-baseline" => {
+                let result: Result<crate::flame::Profile, String> = if arg.is_empty() {
+                    Ok(self.snapshot.telemetry.profile.clone())
+                } else {
+                    std::fs::read(arg)
+                        .map_err(|e| e.to_string())
+                        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| e.to_string()))
+                };
+                match result {
+                    Ok(profile) if !profile.is_empty() => {
+                        if let Err(error) = profile.validate() {
+                            self.status = error;
+                            return;
+                        }
+                        self.flame_baseline = Some(profile);
+                        self.flame_compare = None;
+                        self.status = "Profile baseline retained; D compares sample shares".into();
+                    }
+                    Ok(_) => self.status = "Baseline needs usable samples".into(),
+                    Err(e) => self.status = format!("Baseline failed: {e}"),
+                }
+            }
+            "profile-diff" => {
+                if arg == "off" {
+                    self.flame_compare = None;
+                    return;
+                }
+                let mode = match arg {
+                    "counts" => crate::flame::ComparisonMode::Counts,
+                    "share" | "" => crate::flame::ComparisonMode::Share,
+                    _ => {
+                        self.status = "Use profile-diff counts|share|off".into();
+                        return;
+                    }
+                };
+                match self
+                    .flame_baseline
+                    .as_ref()
+                    .ok_or_else(|| "Set profile-baseline first".to_string())
+                    .and_then(|baseline| self.snapshot.telemetry.profile.compare(baseline, mode))
+                {
+                    Ok(_) => {
+                        self.flame_compare = Some(mode);
+                        self.switch(13);
+                        self.status =
+                            "Comparing profiles; profile-diff off returns to current capture"
+                                .into();
+                    }
+                    Err(e) => self.status = e,
+                }
+            }
             "mark" if self.tab == 8 => {
                 if let Some(name) = self
                     .rows()
@@ -2118,7 +2231,7 @@ impl App {
             "freeze" => self.frozen = !self.frozen,
             "export" => {
                 self.status = match self.export() {
-                    Ok(p) => format!("✓ exported {} · 8 files", p.display()),
+                    Ok(p) => format!("✓ exported {} · profile included", p.display()),
                     Err(e) => format!("Export failed: {e}"),
                 }
             }
@@ -2175,6 +2288,14 @@ impl App {
                 self.time_cursor = None
             }
             "probe" => {
+                if arg.split_whitespace().next() == Some("cpu") {
+                    self.flame_cpu = true;
+                    self.flame_target = None;
+                    self.flame_choosing = false;
+                    self.snapshot.telemetry.profile = crate::flame::Profile::default();
+                    self.snapshot.telemetry.profile.metadata.kind = crate::flame::Kind::Cpu;
+                    self.switch(13);
+                }
                 self.probe_request = Some(arg.into());
                 self.status = format!("Requesting {arg} trace acquisition…")
             }
@@ -2524,7 +2645,12 @@ impl App {
         }
     }
     pub fn export(&self) -> std::io::Result<PathBuf> {
-        recording::export_with_actions(&self.snapshot, &self.action_journal)
+        recording::export_profiles(
+            &self.snapshot,
+            &self.action_journal,
+            self.flame_baseline.as_ref(),
+            self.flame_compare,
+        )
     }
 }
 

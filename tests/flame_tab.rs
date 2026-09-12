@@ -187,7 +187,7 @@ fn the_truncated_share_is_reported_rather_than_repaired() {
     assert!(profile.shallow > 0, "the fixture includes truncated stacks");
     let screen = render(&a, 160, 52);
     assert!(
-        screen.contains("truncated"),
+        screen.contains("shallow"),
         "a profile with truncated stacks must say so"
     );
 }

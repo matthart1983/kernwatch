@@ -14,5 +14,6 @@ crossterm = "0.27"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"
-[target.'cfg(target_os = "linux")'.dependencies]
 aya = "0.13.1"
+rustc-demangle = "0.1"
+cpp_demangle = { version = "0.4.5", path = "vendor/cpp_demangle" }

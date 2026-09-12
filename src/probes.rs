@@ -34,12 +34,15 @@ struct Event {
     text: [u8; 80],
 }
 pub struct Probes {
+    cpu_sampler: Option<crate::cpu_profile::Sampler>,
     capture_id: String,
     owned_attachments: BTreeMap<String, String>,
     _bpf: Ebpf,
     stats: Option<std::os::fd::OwnedFd>,
     stats_error: Option<String>,
     started: std::time::Instant,
+    ended: Option<std::time::Instant>,
+    cpu_ended: Option<u64>,
     cpu_started: u64,
     ring: RingBuf<MapData>,
     losses: PerCpuArray<MapData, u64>,
@@ -73,6 +76,9 @@ impl Probes {
         let mode = words.next().ok_or_else(|| err("missing probe type"))?;
         let mut capture_stack = 0u32;
         let mut pid = 0u32;
+        let mut tgid = 0u32;
+        let mut hz = 49u64;
+        let mut entries = 8192u32;
         let mut cgroup = 0u64;
         let mut duration_seconds = 30;
         for option in words {
@@ -82,8 +88,23 @@ impl Probes {
             }
             if let Some(value) = option.strip_prefix("pid=") {
                 pid = value.parse().map_err(err)?;
-                if !["sched", "offcpu", "syscalls"].contains(&mode) {
+                if !["sched", "offcpu", "syscalls", "cpu"].contains(&mode) {
                     return Err(err("PID scope supports sched/syscalls"));
+                }
+            } else if let Some(value) = option.strip_prefix("tgid=") {
+                tgid = value.parse().map_err(err)?;
+                if mode != "cpu" || tgid == 0 {
+                    return Err(err("tgid scope requires cpu and a nonzero TGID"));
+                }
+            } else if let Some(value) = option.strip_prefix("entries=") {
+                entries = value.parse().map_err(err)?;
+                if mode != "cpu" || !(1..=8192).contains(&entries) {
+                    return Err(err("CPU map entries must be 1..8192"));
+                }
+            } else if let Some(value) = option.strip_prefix("hz=") {
+                hz = value.parse().map_err(err)?;
+                if mode != "cpu" || !(1..=999).contains(&hz) {
+                    return Err(err("CPU frequency must be 1..999 Hz"));
                 }
             } else if let Some(value) = option.strip_prefix("seconds=") {
                 duration_seconds = value.parse::<u64>().map_err(err)?;
@@ -108,9 +129,13 @@ impl Probes {
         if capture_stack != 0 && (mode != "syscalls" || pid == 0) {
             return Err(err("user stack capture requires syscalls pid=TID stack"));
         }
+        if mode == "cpu" && pid != 0 && tgid != 0 {
+            return Err(err("choose pid=TID or tgid=TGID, not both"));
+        }
         let scope =
             format!("{mode} · TID {pid} (0=all) · cgroup id {cgroup} · {duration_seconds}s");
         let programs: &[(&str, &str)] = match mode {
+            "cpu" => &[("kw_profile_exec", "sched_process_exec")],
             "all" => &[
                 ("kw_wake", "sched_wakeup"),
                 ("kw_wake_new", "sched_wakeup_new"),
@@ -160,7 +185,21 @@ impl Probes {
         let object = aya::include_bytes_aligned!("../probes/kernwatch-aarch64.bpf.o");
         #[cfg(not(target_arch = "aarch64"))]
         let object = aya::include_bytes_aligned!("../probes/kernwatch.bpf.o");
+        let identity_pid = if tgid != 0 { tgid } else { pid };
+        let target_start_ticks = if mode == "cpu" && identity_pid != 0 {
+            crate::cpu_profile::start_ticks(identity_pid)
+                .ok_or_else(|| err("CPU target no longer exists"))?
+        } else {
+            0
+        };
+        let target_clock_hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
         let mut bpf = aya::EbpfLoader::new()
+            .set_max_entries("profile_counts", entries)
+            .set_max_entries("stacks", entries)
+            .set_global("target_start_ticks", &target_start_ticks, true)
+            .set_global("target_clock_hz", &target_clock_hz, true)
+            .set_global("target_tgid", &tgid, true)
+            .set_global("sample_tid", &pid, true)
             .set_global("capture_stack", &capture_stack, true)
             .set_global("target_pid", &pid, true)
             .set_global("target_cgroup", &cgroup, true)
@@ -178,8 +217,23 @@ impl Probes {
             owned_attachments.insert(p.info().map_err(err)?.id().to_string(), attach.to_string());
         }
         let mut symbols = crate::symbols::Symbols::default();
-        if capture_stack != 0 {
+        if capture_stack != 0 || mode == "cpu" {
             symbols.load_kernel();
+        }
+        let cpu_sampler = if mode == "cpu" {
+            Some(crate::cpu_profile::Sampler::start(
+                &mut bpf,
+                hz,
+                if tgid != 0 { tgid } else { pid },
+            )?)
+        } else {
+            None
+        };
+        if mode == "cpu"
+            && identity_pid != 0
+            && crate::cpu_profile::start_ticks(identity_pid) != Some(target_start_ticks)
+        {
+            return Err(err("CPU target changed identity while attaching"));
         }
         let stack_source = format!("{mode} · TID {pid} · user stacks");
         let stacks = StackTraceMap::try_from(
@@ -200,12 +254,66 @@ impl Probes {
         if stats.is_some() {
             ACTIVE_STATS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        let mut profile = crate::flame::Profile::new(&stack_source);
+        profile.metadata = crate::flame::Metadata {
+            kind: if mode == "cpu" {
+                crate::flame::Kind::Cpu
+            } else if capture_stack != 0 {
+                crate::flame::Kind::Syscalls
+            } else {
+                crate::flame::Kind::Unknown
+            },
+            scope: if mode == "cpu" {
+                if tgid != 0 {
+                    format!("process TGID {tgid}")
+                } else if pid != 0 {
+                    format!("thread TID {pid}")
+                } else {
+                    "system-wide".into()
+                }
+            } else {
+                format!("thread TID {pid}")
+            },
+            unit: if mode == "cpu" {
+                "cpu_samples"
+            } else {
+                "syscall_observations"
+            }
+            .into(),
+            duration_seconds,
+            frequency_hz: if mode == "cpu" { hz } else { 0 },
+            ..Default::default()
+        };
+        if mode == "cpu" {
+            profile.source = format!("CPU · {} · {hz} Hz · user + kernel", profile.metadata.scope);
+        }
+        if !symbols.kernel_loaded() && !symbols.kernel_restricted && mode == "cpu" {
+            profile
+                .metadata
+                .warnings
+                .push("Kernel symbol table unavailable; addresses retained".into());
+        }
+        if mode == "cpu" && symbols.kernel_loaded() {
+            profile
+                .metadata
+                .warnings
+                .push("Kernel symbol extents are estimated from kallsyms".into());
+        }
+        if symbols.kernel_restricted {
+            profile
+                .metadata
+                .warnings
+                .push("Kernel symbols restricted; addresses retained".into());
+        }
         Ok(Self {
+            cpu_sampler,
             capture_id: crate::recording::stamp().to_string(),
             owned_attachments,
             stats,
             stats_error,
             started: std::time::Instant::now(),
+            ended: None,
+            cpu_ended: None,
             cpu_started: thread_cpu_ns(),
             _bpf: bpf,
             ring,
@@ -218,7 +326,7 @@ impl Probes {
             last_loss: 0,
             mode: mode.into(),
             target_pid: pid,
-            profile: crate::flame::Profile::new(&stack_source),
+            profile,
             stack_tally: BTreeMap::new(),
             symbols,
             start_ns: None,
@@ -228,7 +336,37 @@ impl Probes {
             scope,
         })
     }
+    pub fn stopped(&self) -> bool {
+        self.cpu_sampler
+            .as_ref()
+            .is_some_and(crate::cpu_profile::Sampler::stopped)
+    }
+    pub fn finish(&mut self) -> io::Result<()> {
+        if let Some(sampler) = &mut self.cpu_sampler {
+            sampler.finish(&mut self._bpf)?;
+        }
+        let result = self.poll();
+        self.ended.get_or_insert_with(std::time::Instant::now);
+        self.cpu_ended.get_or_insert_with(thread_cpu_ns);
+        result
+    }
+    fn elapsed(&self) -> std::time::Duration {
+        self.ended
+            .unwrap_or_else(std::time::Instant::now)
+            .duration_since(self.started)
+    }
     pub fn poll(&mut self) -> io::Result<()> {
+        self.profile.metadata.elapsed_seconds = self.elapsed().as_secs_f64();
+        if let Some(sampler) = &mut self.cpu_sampler {
+            sampler.poll(
+                &mut self._bpf,
+                &self.stacks,
+                &mut self.symbols,
+                &mut self.profile,
+            )?;
+            self.processed = self.profile.quality.attempted;
+            return Ok(());
+        }
         let lost = self.losses.get(&0, 0).map_err(err)?.iter().sum::<u64>();
         if lost > self.last_loss {
             self.correlator.loss(lost - self.last_loss);
@@ -270,17 +408,27 @@ impl Probes {
                     let mut tally = |reason: &str| {
                         *self.stack_tally.entry(reason.to_owned()).or_default() += 1;
                     };
+                    if self.profile.metadata.kind == crate::flame::Kind::Syscalls {
+                        self.profile.quality.attempted += 1;
+                    }
                     let stack = if e.pad == u32::MAX {
                         tally("not requested");
                         String::new()
                     } else if (e.pad as i32) < 0 {
                         let errno = -(e.pad as i32);
+                        self.profile.quality.failed += 1;
+                        *self
+                            .profile
+                            .quality
+                            .errors
+                            .entry(format!("user walk errno {errno}"))
+                            .or_default() += 1;
                         // EFAULT here is the ordinary outcome of a binary built
                         // without frame pointers: there is no chain to walk.
                         tally(&format!(
                             "walk failed (errno {errno}{})",
                             if errno == 14 {
-                                ", no frame pointer"
+                                ", possible missing frame pointer"
                             } else {
                                 ""
                             }
@@ -295,15 +443,27 @@ impl Probes {
                                 let mut frames = trace
                                     .frames()
                                     .iter()
-                                    .map(|f| self.symbols.frame(e.pid, f.ip, false))
+                                    .map(|f| {
+                                        let (id, info) =
+                                            self.symbols.identified(e.pid, f.ip, false);
+                                        self.profile.frames.insert(id.clone(), info);
+                                        id
+                                    })
                                     .collect::<Vec<_>>();
                                 frames.reverse();
-                                self.profile.add(&frames, 1);
+                                self.profile.observe(&frames, &[], 1);
                                 tally("collected");
                                 format!(" user_stack={}", frames.join(";"))
                             }
                             Err(error) => {
                                 tally("stack map read failed");
+                                self.profile.quality.failed += 1;
+                                *self
+                                    .profile
+                                    .quality
+                                    .errors
+                                    .entry("user stack map read failed".into())
+                                    .or_default() += 1;
                                 format!(" user_stack_unavailable={error}")
                             }
                         }
@@ -381,6 +541,9 @@ impl Probes {
         Ok(())
     }
     pub fn apply(&self, t: &mut Telemetry) {
+        if self.mode == "cpu" {
+            t.capabilities.insert("cpu".into(), Quality::Available);
+        }
         self.correlator.apply(t);
         // How far through the bounded capture we are, so a view can show a
         // countdown instead of leaving a quiet capture indistinguishable from
@@ -390,13 +553,13 @@ impl Probes {
             vec![
                 (
                     "elapsed seconds".into(),
-                    self.started.elapsed().as_secs().to_string(),
+                    self.elapsed().as_secs().to_string(),
                 ),
                 ("duration seconds".into(), self.duration_seconds.to_string()),
                 ("target tid".into(), self.target_pid.to_string()),
             ],
         );
-        if !self.profile.is_empty() {
+        if !self.profile.is_empty() || self.mode == "cpu" || self.profile.quality.attempted > 0 {
             let mut profile = self.profile.clone();
             profile.sort();
             t.profile = profile;
@@ -433,9 +596,14 @@ impl Probes {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
         );
-        let elapsed = self.started.elapsed().as_secs_f64().max(0.001);
-        let ingest_cpu =
-            thread_cpu_ns().saturating_sub(self.cpu_started) as f64 / 1e9 / elapsed * 100.;
+        let elapsed = self.elapsed().as_secs_f64().max(0.001);
+        let ingest_cpu = self
+            .cpu_ended
+            .unwrap_or_else(thread_cpu_ns)
+            .saturating_sub(self.cpu_started) as f64
+            / 1e9
+            / elapsed
+            * 100.;
         t.metrics.insert(
             "trace.ingest_cpu".into(),
             Measurement::known(
@@ -1026,10 +1194,13 @@ pub fn merge_profile(
     if new_capture {
         *retained = crate::flame::Profile::default();
     }
-    if !captured.is_empty() {
+    if !captured.is_empty()
+        || captured.quality.attempted > 0
+        || captured.metadata.kind == crate::flame::Kind::Cpu
+    {
         *retained = captured.clone();
     }
-    if !retained.is_empty() {
+    if !retained.is_empty() || retained.metadata.kind != crate::flame::Kind::Unknown {
         s.telemetry.profile = retained.clone();
     }
 }

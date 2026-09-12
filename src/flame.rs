@@ -6,8 +6,8 @@
 //! be a real call path are counted so the panel can say how many there were.
 use serde::{Deserialize, Serialize};
 
-/// A stack shallower than this almost always means the frame pointer chain
-/// ended early, not that the program really is one call deep.
+/// Shallow stacks can indicate an incomplete frame-pointer walk. This is a
+/// heuristic, not proof: legitimately short call paths also occur.
 pub const SHALLOW: usize = 2;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -39,18 +39,22 @@ impl Node {
             child.sort();
         }
     }
-    fn fold(&self, prefix: &str, out: &mut Vec<String>) {
+    fn fold(&self, prefix: &str, out: &mut Vec<String>, profile: &Profile) {
+        let name = profile
+            .label(&self.name)
+            .replace(';', ":")
+            .replace(['\n', '\r'], " ");
         let path = if prefix.is_empty() {
-            self.name.clone()
+            name
         } else {
-            format!("{prefix};{}", self.name)
+            format!("{prefix};{name}")
         };
         let own = self.own();
         if own > 0 {
             out.push(format!("{path} {own}"));
         }
         for child in &self.children {
-            child.fold(&path, out);
+            child.fold(&path, out, profile);
         }
     }
     /// Levels below this frame, counting itself as one.
@@ -66,8 +70,58 @@ impl Node {
     }
 }
 
+/// Capture semantics are explicit; old recordings remain Unknown.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    #[default]
+    Unknown,
+    Syscalls,
+    Cpu,
+}
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Metadata {
+    pub kind: Kind,
+    pub scope: String,
+    pub unit: String,
+    pub duration_seconds: u64,
+    pub elapsed_seconds: f64,
+    pub frequency_hz: u64,
+    pub cpus: Vec<u32>,
+    pub warnings: Vec<String>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Quality {
+    pub attempted: u64,
+    pub user_stacks: u64,
+    pub kernel_stacks: u64,
+    pub partial: u64,
+    pub failed: u64,
+    pub depth_limit: u64,
+    pub map_failures: u64,
+    pub errors: std::collections::BTreeMap<String, u64>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FrameInfo {
+    pub raw: String,
+    pub display: String,
+    pub image: String,
+    pub address: u64,
+    pub kernel: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Profile {
+    #[serde(default)]
+    pub tasks: std::collections::BTreeMap<String, u64>,
+    #[serde(default)]
+    pub metadata: Metadata,
+    #[serde(default)]
+    pub quality: Quality,
+    #[serde(default)]
+    pub frames: std::collections::BTreeMap<String, FrameInfo>,
     pub root: Node,
     /// What produced these stacks, named the way the capture named it.
     pub source: String,
@@ -107,6 +161,54 @@ impl Profile {
             node.samples += weight;
         }
     }
+    pub fn label<'a>(&'a self, identity: &'a str) -> &'a str {
+        self.frames
+            .get(identity)
+            .map_or(identity, |f| f.display.as_str())
+    }
+    /// User quality is measured before adding domain/process frames.
+    pub fn observe(&mut self, user: &[String], kernel: &[String], weight: u64) {
+        if !user.is_empty() {
+            self.quality.user_stacks += weight;
+        }
+        if !kernel.is_empty() {
+            self.quality.kernel_stacks += weight;
+        }
+        if user.len() == 127 || kernel.len() == 127 {
+            self.quality.depth_limit += weight;
+        }
+        if user.is_empty() && kernel.is_empty() {
+            self.quality.failed += weight;
+            return;
+        }
+        if self.metadata.kind == Kind::Cpu && (user.is_empty() || kernel.is_empty()) {
+            self.quality.partial += weight;
+        }
+        let mut frames = user.to_vec();
+        if !kernel.is_empty() {
+            frames.push("[kernel]".into());
+            frames.extend_from_slice(kernel);
+        }
+        let before = self.shallow;
+        let unresolved = self.unresolved;
+        self.add(&frames, weight);
+        self.shallow = before
+            + if !user.is_empty() && user.len() <= SHALLOW {
+                weight
+            } else {
+                0
+            };
+        self.unresolved = unresolved
+            + if frames.iter().any(|id| {
+                self.frames
+                    .get(id)
+                    .map_or_else(|| id.starts_with("0x"), |f| f.raw.starts_with("0x"))
+            }) {
+                weight
+            } else {
+                0
+            };
+    }
     pub fn sort(&mut self) {
         self.root.sort();
     }
@@ -117,7 +219,7 @@ impl Profile {
     pub fn folded(&self) -> Vec<String> {
         let mut out = Vec::new();
         for child in &self.root.children {
-            child.fold("", &mut out);
+            child.fold("", &mut out, self);
         }
         out
     }
@@ -125,13 +227,19 @@ impl Profile {
     /// collected at all. Reported rather than corrected: without frame
     /// pointers a truncated stack is indistinguishable from a short one.
     pub fn shallow_share(&self) -> Option<f64> {
-        (self.root.samples > 0).then(|| self.shallow as f64 / self.root.samples as f64 * 100.)
+        let denominator = if self.metadata.kind == Kind::Cpu {
+            self.quality.user_stacks
+        } else {
+            self.root.samples
+        };
+        (denominator > 0).then(|| self.shallow as f64 / denominator as f64 * 100.)
     }
 }
 
 /// One frame's place in the icicle.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Placed {
+    pub delta: Option<f64>,
     pub depth: u16,
     pub x: u16,
     pub width: u16,
@@ -184,6 +292,7 @@ fn place(
     out: &mut Layout,
 ) {
     out.cells.push(Placed {
+        delta: None,
         depth,
         x,
         width,
@@ -239,6 +348,7 @@ fn place(
             let earned = ((narrow as u128 * width as u128) / total) as u16;
             let stand_in = earned.max(1).min(spare);
             out.cells.push(Placed {
+                delta: None,
                 depth: depth + 1,
                 x: x + consumed,
                 width: stand_in,
@@ -252,6 +362,151 @@ fn place(
         } else {
             out.hidden += narrow_frames;
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComparisonMode {
+    #[default]
+    Counts,
+    Share,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Change {
+    pub path: Vec<String>,
+    pub before: u64,
+    pub after: u64,
+    pub delta: f64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Comparison {
+    pub mode: ComparisonMode,
+    pub changes: Vec<Change>,
+    pub warnings: Vec<String>,
+    pub baseline: Metadata,
+    pub current: Metadata,
+}
+impl Profile {
+    /// Layout mass is the maximum baseline/current count at each terminal
+    /// path. This preserves removed paths without claiming widths are deltas.
+    pub fn comparison_union(&self, baseline: &Profile) -> Profile {
+        fn union(before: Option<&Node>, after: Option<&Node>, name: String) -> Node {
+            let mut names = std::collections::BTreeSet::new();
+            for node in [before, after].into_iter().flatten() {
+                names.extend(node.children.iter().map(|c| c.name.clone()));
+            }
+            let mut children: Vec<Node> = names
+                .into_iter()
+                .map(|name| {
+                    union(
+                        before.and_then(|n| n.children.iter().find(|c| c.name == name)),
+                        after.and_then(|n| n.children.iter().find(|c| c.name == name)),
+                        name,
+                    )
+                })
+                .collect();
+            children.sort_by(|x, y| y.samples.cmp(&x.samples).then_with(|| x.name.cmp(&y.name)));
+            let own = before.map_or(0, Node::own).max(after.map_or(0, Node::own));
+            Node {
+                name,
+                samples: own + children.iter().map(|c| c.samples).sum::<u64>(),
+                children,
+            }
+        }
+        let mut profile = self.clone();
+        profile.frames.extend(baseline.frames.clone());
+        profile.root = union(Some(&baseline.root), Some(&self.root), "comparison".into());
+        profile
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        fn node(n: &Node) -> Result<(), String> {
+            let mut total = 0u64;
+            let mut names = std::collections::BTreeSet::new();
+            for child in &n.children {
+                if !names.insert(&child.name) {
+                    return Err("Profile contains duplicate sibling identities".into());
+                }
+                total = total
+                    .checked_add(child.samples)
+                    .ok_or("Profile counts overflow")?;
+                node(child)?;
+            }
+            if total > n.samples {
+                return Err("Profile children exceed their parent's count".into());
+            }
+            Ok(())
+        }
+        node(&self.root)
+    }
+    pub fn compare(&self, baseline: &Profile, mode: ComparisonMode) -> Result<Comparison, String> {
+        if self.metadata.kind == Kind::Unknown || baseline.metadata.kind == Kind::Unknown {
+            return Err(
+                "Profile provenance is unknown; select a capture with explicit kind and units"
+                    .into(),
+            );
+        }
+        if self.metadata.kind != baseline.metadata.kind
+            || self.metadata.unit != baseline.metadata.unit
+        {
+            return Err("Cannot compare different capture kinds or weight units".into());
+        }
+        if self.is_empty() || baseline.is_empty() {
+            return Err("Both profiles need usable samples".into());
+        }
+        fn walk(
+            node: &Node,
+            path: &mut Vec<String>,
+            counts: &mut std::collections::BTreeMap<Vec<String>, (u64, u64)>,
+            current: bool,
+        ) {
+            for child in &node.children {
+                path.push(child.name.clone());
+                let entry = counts.entry(path.clone()).or_default();
+                if current {
+                    entry.1 = child.samples;
+                } else {
+                    entry.0 = child.samples;
+                }
+                walk(child, path, counts, current);
+                path.pop();
+            }
+        }
+        let mut counts = std::collections::BTreeMap::new();
+        walk(&baseline.root, &mut Vec::new(), &mut counts, false);
+        walk(&self.root, &mut Vec::new(), &mut counts, true);
+        let changes = counts
+            .into_iter()
+            .map(|(path, (before, after))| Change {
+                path,
+                before,
+                after,
+                delta: match mode {
+                    ComparisonMode::Counts => (after as i128 - before as i128) as f64,
+                    ComparisonMode::Share => {
+                        100. * (after as f64 / self.root.samples as f64
+                            - before as f64 / baseline.root.samples as f64)
+                    }
+                },
+            })
+            .collect();
+        let mut warnings = Vec::new();
+        if self.metadata.scope != baseline.metadata.scope {
+            warnings.push("Scopes differ".into());
+        }
+        if self.metadata.elapsed_seconds != baseline.metadata.elapsed_seconds {
+            warnings.push("Capture durations differ".into());
+        }
+        if self.metadata.frequency_hz != baseline.metadata.frequency_hz {
+            warnings.push("Requested frequencies differ".into());
+        }
+        Ok(Comparison {
+            mode,
+            changes,
+            warnings,
+            baseline: baseline.metadata.clone(),
+            current: self.metadata.clone(),
+        })
     }
 }
 
