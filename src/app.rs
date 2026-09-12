@@ -1503,6 +1503,32 @@ impl App {
                     }
                 }
             }
+            // Profile the selected thread: the interactive form of
+            // `: probe syscalls pid=TID seconds=30 stack`.
+            // On the profile itself there is no thread list to select from, so
+            // P goes to the one place a thread can be chosen.
+            KeyCode::Char('P') if self.tab == 13 => {
+                self.switch(1);
+                self.status = "Select a thread, then press P to profile it".into();
+            }
+            KeyCode::Char('P') if self.tab == 1 || self.tab == 12 => {
+                match self.selected_task().map(|x| (x.pid, x.name.clone())) {
+                    _ if self.snapshot.demo || self.replay.is_some() => {
+                        self.status =
+                            "Stack capture requires live mode; this profile is fixture data".into()
+                    }
+                    Some((pid, name)) => {
+                        self.probe_request = Some(format!("syscalls pid={pid} seconds=30 stack"));
+                        self.switch(13);
+                        self.status = format!(
+                            "Profiling {name} TID {pid} for 30s; stacks appear as syscalls are made"
+                        );
+                    }
+                    None => {
+                        self.status = "Select a thread on Tasks to profile it, then press P".into()
+                    }
+                }
+            }
             KeyCode::Char('n') if self.tab == 9 => {
                 self.palette = true;
                 self.command = "probe ".into();

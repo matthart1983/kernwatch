@@ -217,3 +217,60 @@ fn an_empty_profile_says_which_reason_it_is() {
         "a reader who cannot walk a binary should be told what would fix it"
     );
 }
+
+#[test]
+fn profiling_the_selected_thread_starts_a_stack_capture_for_it() {
+    let mut a = App::new(model::demo());
+    a.snapshot.demo = false;
+    a.switch(1);
+    let pid = a.selected_task().expect("the fixture lists threads").pid;
+    key(&mut a, KeyCode::Char('P'));
+    assert_eq!(
+        a.probe_request.as_deref(),
+        Some(format!("syscalls pid={pid} seconds=30 stack").as_str()),
+        "P should request the capture the Flame view needs, scoped to the selection"
+    );
+    assert_eq!(a.tab, FLAME, "and show the profile it is filling");
+    assert!(a.status.contains(&pid.to_string()));
+}
+
+#[test]
+fn moving_the_selection_profiles_the_thread_that_is_selected() {
+    let mut a = App::new(model::demo());
+    a.snapshot.demo = false;
+    a.switch(1);
+    key(&mut a, KeyCode::Down);
+    key(&mut a, KeyCode::Down);
+    let pid = a.selected_task().expect("a later thread").pid;
+    key(&mut a, KeyCode::Char('P'));
+    assert_eq!(
+        a.probe_request.as_deref(),
+        Some(format!("syscalls pid={pid} seconds=30 stack").as_str())
+    );
+}
+
+#[test]
+fn a_demo_or_replay_profile_refuses_to_start_a_host_capture() {
+    let mut a = App::new(model::demo());
+    a.switch(1);
+    key(&mut a, KeyCode::Char('P'));
+    assert!(
+        a.probe_request.is_none(),
+        "demo data must never start a capture on the host"
+    );
+    assert!(a.status.contains("live mode"));
+    assert_eq!(a.tab, 1, "and the view does not move");
+}
+
+#[test]
+fn profiling_from_the_flame_view_goes_where_a_thread_can_be_chosen() {
+    let mut a = App::new(model::demo());
+    a.snapshot.demo = false;
+    a.switch(FLAME);
+    key(&mut a, KeyCode::Char('P'));
+    assert_eq!(a.tab, 1, "the profile itself has no thread list");
+    assert!(
+        a.probe_request.is_none(),
+        "nothing is captured until one is picked"
+    );
+}

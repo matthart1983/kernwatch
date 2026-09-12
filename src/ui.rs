@@ -73,7 +73,7 @@ pub fn draw(f: &mut Frame, a: &App) {
         "↑↓ scroll · Esc close"
     } else {
         match a.tab {
-            1 => "l latency capture · G group · w watch · a affinity",
+            1 => "l latency capture · P profile stacks · G group · w watch · a affinity",
             2 => "g scope · M metric · h histogram · z scale",
             3 => "g memory view · U units · ↵ cache/process",
             4 => "↵ queue IRQ · i IRQs",
@@ -84,7 +84,8 @@ pub fn draw(f: &mut Frame, a: &App) {
             9 => "n probe · ↵ program/maps",
             10 => "t source/time · c diagnosis · ↵ record",
             11 => "Tab evidence/action · ↵ inspect/preview · v verify",
-            12 => "l task latency · ↵ drill · [ ] views",
+            12 => "l task latency · P profile stacks · ↵ drill · [ ] views",
+            13 => "↵ zoom · Esc widen · P profile a thread · e export",
             _ => "↵ drill · [ ] views",
         }
     };

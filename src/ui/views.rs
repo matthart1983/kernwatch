@@ -1068,7 +1068,7 @@ fn tasks(f: &mut Frame, r: Rect, a: &App) {
         actions,
         &[
             "↵ scheduler on selected CPU    i IRQ affinity    a affinity dry-run",
-            "c cgroup · t syscall capture · y copy identity · w watch · : probe syscalls pid=TID stack",
+            "c cgroup · t syscall capture · P profile stacks · y copy identity · w watch",
         ],
     );
 }
@@ -3441,8 +3441,9 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
                 lines.push("Stack capture needs BPF privileges; restart as root.".into());
             }
             _ => {
-                lines.push("No capture has been started. Stacks come from one:".into());
-                lines.push("  : probe syscalls pid=TID seconds=30 stack".into());
+                lines.push("No capture has been started. To profile a thread:".into());
+                lines.push("  Tasks (2) · select a thread · P".into());
+                lines.push("  or : probe syscalls pid=TID seconds=30 stack".into());
                 lines.push(String::new());
                 lines.push(
                     "pid= takes a thread id, not a process id, and `stack` is refused \
