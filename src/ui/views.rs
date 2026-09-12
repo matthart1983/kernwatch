@@ -3337,12 +3337,14 @@ fn flame_root(a: &App) -> (&crate::flame::Node, Vec<String>) {
 }
 
 fn flame(f: &mut Frame, r: Rect, a: &App) {
+    if a.flame_picking() {
+        flame_picker(f, r, a);
+        return;
+    }
     let profile = &t(a).profile;
-    // The graph is as tall as the stacks are deep, so a shallow profile does
-    // not leave most of the panel blank and a deep one still gets the room.
-    let deepest = flame_root(a).0.depth();
     // An empty profile explains itself in prose, which needs more rows than a
     // shallow graph would.
+    let deepest = flame_root(a).0.depth();
     let wanted = if profile.is_empty() { 16 } else { deepest + 3 };
     let graph = wanted.clamp(8, r.height.saturating_sub(10).max(8));
     let bands = vertical(
@@ -3357,7 +3359,7 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
         f,
         bands[0],
         format!(
-            " ↵ zoom frame · Esc widen · ↑↓ select    · e export folds the stacks{}",
+            " ↵ zoom frame · Esc widen · ↑↓ select · P profile another thread{}",
             if a.snapshot.demo {
                 " · demo fixture"
             } else {
@@ -3379,15 +3381,16 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
         }
         parts.join(" · ")
     };
+    // Name the subject in the title: a profile is unreadable without knowing
+    // whose stacks it is.
+    let subject = flame_subject(a);
     let title = if zoom.is_empty() {
-        "stacks".to_string()
+        subject.clone()
     } else {
-        format!("stacks · {}", zoom.join(" › "))
+        format!("{subject} · {}", zoom.join(" › "))
     };
     let area = p(f, bands[1], a, 1, &title, &subtitle);
     let cells = crate::flame::layout(root, area.width, area.height);
-    // Selection moves between the zoomed frame's children, so which cell is
-    // highlighted does not depend on how wide the terminal drew them.
     let chosen = root.children.get(a.selected).map(|c| c.name.as_str());
     let selected = chosen
         .and_then(|name| {
@@ -3398,69 +3401,26 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
         })
         .unwrap_or(usize::MAX);
     if profile.is_empty() {
-        // An empty profile has several causes and they need different
-        // answers, so the panel reports which one it is rather than repeating
-        // the same sentence.
-        let mut lines = vec!["No stacks have been collected.".to_string(), String::new()];
-        match t(a).capabilities.get("syscalls") {
-            Some(crate::domain::Quality::Available) => {
-                lines.push("A syscall capture is running.".into());
-                match t(a).details.get("probe.stacks") {
-                    Some(tally) => {
-                        lines.push("Stacks seen by this capture:".into());
-                        lines.extend(
-                            tally
-                                .iter()
-                                .map(|(reason, count)| format!("  {count} {reason}")),
-                        );
-                        lines.push(String::new());
-                        lines.push(
-                            "`not requested` means the capture was started without `stack`.".into(),
-                        );
-                        lines.push(
-                            "`no frame pointer` means the traced binary cannot be walked; \
-                             rebuild it with -fno-omit-frame-pointer to profile it."
-                                .into(),
-                        );
-                    }
-                    None => lines.push(
-                        "It has recorded no syscall yet. A thread that makes no syscalls \
-                         produces no stacks."
-                            .into(),
-                    ),
-                }
-            }
-            Some(
-                crate::domain::Quality::Denied(why)
-                | crate::domain::Quality::Error(why)
-                | crate::domain::Quality::Unsupported(why),
-            ) => {
-                lines.push("The last syscall capture did not run:".into());
-                lines.push(format!("  {why}"));
-                lines.push(String::new());
-                lines.push("Stack capture needs BPF privileges; restart as root.".into());
-            }
-            _ => {
-                lines.push("No capture has been started. To profile a thread:".into());
-                lines.push("  Tasks (2) · select a thread · P".into());
-                lines.push("  or : probe syscalls pid=TID seconds=30 stack".into());
-                lines.push(String::new());
-                lines.push(
-                    "pid= takes a thread id, not a process id, and `stack` is refused \
-                     without it."
-                        .into(),
-                );
-                lines.push("Opening this view collects nothing on its own.".into());
-            }
-        }
-        text(f, area, lines.into_iter().map(Line::raw).collect());
+        text(
+            f,
+            area,
+            flame_empty_lines(a).into_iter().map(Line::raw).collect(),
+        );
     } else {
         icicle(f, area, &cells.cells, selected);
     }
-    let detail = p(f, bands[2], a, 2, "frame", "share of the zoomed subtree");
-    let mut fields = Vec::new();
+    let detail = p(
+        f,
+        bands[2],
+        a,
+        2,
+        "subject / frame",
+        "what is being profiled",
+    );
+    let mut fields = flame_subject_fields(a);
     if let Some(node) = root.children.get(a.selected) {
         let share = node.samples as f64 / root.samples.max(1) as f64 * 100.;
+        fields.push((String::new(), String::new()));
         fields.push(("frame".into(), node.name.clone()));
         fields.push((
             "samples".into(),
@@ -3487,21 +3447,179 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
             ),
         ));
     }
-    if !profile.source.is_empty() {
-        fields.push(("source".into(), profile.source.clone()));
+    fields_widget(f, detail, &fields, 0);
+}
+
+/// What the profile is of, named the way the capture named it.
+fn flame_subject(a: &App) -> String {
+    match &a.flame_target {
+        Some(task) => format!("{} · TID {}", task.name, task.pid),
+        None if !t(a).profile.source.is_empty() => t(a).profile.source.clone(),
+        None => "stacks".into(),
     }
+}
+
+/// The thread being profiled, as detail rows.
+fn flame_subject_fields(a: &App) -> Vec<(String, String)> {
+    let mut fields = Vec::new();
+    match &a.flame_target {
+        Some(task) => {
+            fields.push(("thread".into(), format!("{} · TID {}", task.name, task.pid)));
+            fields.push((
+                "process".into(),
+                format!("TGID {} · parent {}", task.tgid, task.parent_pid),
+            ));
+            fields.push((
+                "state / CPU".into(),
+                format!(
+                    "{} · CPU{} · {}",
+                    task.state,
+                    task.cpu,
+                    task.cpu_pct
+                        .map(|v| format!("{v:.1}%"))
+                        .unwrap_or("—".into())
+                ),
+            ));
+            if !task.cgroup.is_empty() {
+                fields.push(("cgroup".into(), task.cgroup.clone()));
+            }
+            fields.push((
+                "memory".into(),
+                format!("{:.0} MiB RSS", task.rss_bytes as f64 / 1048576.),
+            ));
+            fields.push((
+                "capture".into(),
+                match t(a).capabilities.get("syscalls") {
+                    Some(crate::domain::Quality::Available) => {
+                        "syscall stacks, 30s bounded · x stops it".into()
+                    }
+                    Some(
+                        crate::domain::Quality::Denied(why)
+                        | crate::domain::Quality::Error(why)
+                        | crate::domain::Quality::Unsupported(why),
+                    ) => format!("did not run · {why}"),
+                    _ => "requested".into(),
+                },
+            ));
+        }
+        None if !t(a).profile.source.is_empty() => {
+            fields.push(("source".into(), t(a).profile.source.clone()));
+        }
+        None => {}
+    }
+    let profile = &t(a).profile;
     if profile.shallow > 0 {
         fields.push((
-            "shallow stacks".into(),
+            "truncated".into(),
             format!(
                 "{} of {} samples; frame pointers ended the walk early and are not reconstructed",
                 profile.shallow, profile.root.samples
             ),
         ));
     }
-    if fields.is_empty() {
-        note(f, detail, &["Select a frame to inspect it."]);
+    fields
+}
+
+/// A thread list, so a profile can be started from the view that shows it.
+fn flame_picker(f: &mut Frame, r: Rect, a: &App) {
+    let bands = vertical(r, &[Constraint::Length(1), Constraint::Min(8)]);
+    line(
+        f,
+        bands[0],
+        " ↑↓ select thread · ↵ or P profile it for 30s · / filter".to_string(),
+        DIM,
+    );
+    let tasks = a.visible_tasks();
+    let subtitle = if a.snapshot.demo {
+        "demo fixture · capture requires live mode".to_string()
     } else {
-        fields_widget(f, detail, &fields, 0);
+        format!("{} threads · stacks are captured per thread", tasks.len())
+    };
+    let area = p(f, bands[1], a, 1, "choose a thread to profile", &subtitle);
+    let rows = tasks
+        .iter()
+        .map(|task| {
+            vec![
+                task.name.clone(),
+                task.pid.to_string(),
+                task.state.clone(),
+                task.cpu_pct
+                    .map(|v| format!("{v:.1}"))
+                    .unwrap_or("—".into()),
+                format!("{:.0}", task.rss_bytes as f64 / 1048576.),
+                task.cgroup.clone(),
+                task.verdict.clone(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    table(
+        f,
+        area,
+        &[
+            "thread", "TID", "state", "CPU %", "RSS MiB", "cgroup", "verdict",
+        ],
+        &rows,
+        &[22, 8, 8, 8, 9, 30, 16],
+        a.selected,
+    );
+}
+
+/// Why a profile is empty, in the terms the reader can act on.
+fn flame_empty_lines(a: &App) -> Vec<String> {
+    // An empty profile has several causes and they need different
+    // answers, so the panel reports which one it is rather than repeating
+    // the same sentence.
+    let mut lines = vec!["No stacks have been collected.".to_string(), String::new()];
+    match t(a).capabilities.get("syscalls") {
+        Some(crate::domain::Quality::Available) => {
+            lines.push("A syscall capture is running.".into());
+            match t(a).details.get("probe.stacks") {
+                Some(tally) => {
+                    lines.push("Stacks seen by this capture:".into());
+                    lines.extend(
+                        tally
+                            .iter()
+                            .map(|(reason, count)| format!("  {count} {reason}")),
+                    );
+                    lines.push(String::new());
+                    lines.push(
+                        "`not requested` means the capture was started without `stack`.".into(),
+                    );
+                    lines.push(
+                        "`no frame pointer` means the traced binary cannot be walked; \
+                         rebuild it with -fno-omit-frame-pointer to profile it."
+                            .into(),
+                    );
+                }
+                None => lines.push(
+                    "It has recorded no syscall yet. A thread that makes no syscalls \
+                     produces no stacks."
+                        .into(),
+                ),
+            }
+        }
+        Some(
+            crate::domain::Quality::Denied(why)
+            | crate::domain::Quality::Error(why)
+            | crate::domain::Quality::Unsupported(why),
+        ) => {
+            lines.push("The last syscall capture did not run:".into());
+            lines.push(format!("  {why}"));
+            lines.push(String::new());
+            lines.push("Stack capture needs BPF privileges; restart as root.".into());
+        }
+        _ => {
+            lines.push("No capture has been started. To profile a thread:".into());
+            lines.push("  Tasks (2) · select a thread · P".into());
+            lines.push("  or : probe syscalls pid=TID seconds=30 stack".into());
+            lines.push(String::new());
+            lines.push(
+                "pid= takes a thread id, not a process id, and `stack` is refused \
+                 without it."
+                    .into(),
+            );
+            lines.push("Opening this view collects nothing on its own.".into());
+        }
     }
+    lines
 }

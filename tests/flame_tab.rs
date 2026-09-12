@@ -36,15 +36,35 @@ fn the_demo_profile_draws_its_hottest_path_at_both_sizes() {
 }
 
 #[test]
-fn an_empty_profile_explains_how_to_collect_one_instead_of_drawing_nothing() {
+fn an_empty_view_with_no_thread_chosen_offers_the_threads_to_choose_from() {
     let mut a = App::new(model::demo());
     a.snapshot.telemetry.profile = Default::default();
     a.switch(FLAME);
+    assert!(a.flame_picking());
+    let screen = render(&a, 160, 52);
+    assert!(screen.contains("choose a thread to profile"));
+    assert!(screen.contains("TID"), "the picker identifies threads");
+    assert_eq!(
+        a.flame_children(),
+        0,
+        "selection moves between threads here"
+    );
+    assert!(!a.visible_tasks().is_empty());
+}
+
+#[test]
+fn an_empty_profile_for_a_chosen_thread_explains_itself() {
+    let mut a = App::new(model::demo());
+    a.snapshot.telemetry.profile = Default::default();
+    a.switch(FLAME);
+    a.flame_target = a.snapshot.telemetry.tasks.first().cloned();
+    assert!(!a.flame_picking());
     let screen = render(&a, 160, 52);
     assert!(screen.contains("No stacks have been collected"));
+    let task = a.flame_target.clone().unwrap();
     assert!(
-        screen.contains("stack"),
-        "the empty state should name the capture that would populate it"
+        screen.contains(&task.pid.to_string()),
+        "an empty profile still says whose stacks are missing"
     );
 }
 
@@ -163,6 +183,9 @@ fn an_empty_profile_says_which_reason_it_is() {
         let mut a = App::new(model::demo());
         a.snapshot.demo = false;
         a.snapshot.telemetry.profile = Default::default();
+        // A thread has been chosen, so the view explains the empty profile
+        // rather than offering the list again.
+        a.flame_target = a.snapshot.telemetry.tasks.first().cloned();
         // The fixture ships a syscall capability; each case sets its own.
         a.snapshot.telemetry.capabilities.remove("syscalls");
         setup(&mut a);
@@ -263,14 +286,51 @@ fn a_demo_or_replay_profile_refuses_to_start_a_host_capture() {
 }
 
 #[test]
-fn profiling_from_the_flame_view_goes_where_a_thread_can_be_chosen() {
+fn the_view_can_start_a_profile_without_leaving_it() {
+    let mut a = App::new(model::demo());
+    a.snapshot.demo = false;
+    a.snapshot.telemetry.profile = Default::default();
+    a.switch(FLAME);
+    assert!(
+        a.flame_picking(),
+        "with no thread chosen it offers the list"
+    );
+    key(&mut a, KeyCode::Down);
+    let pid = a.selected_task().expect("a thread").pid;
+    key(&mut a, KeyCode::Enter);
+    assert_eq!(
+        a.probe_request.as_deref(),
+        Some(format!("syscalls pid={pid} seconds=30 stack").as_str()),
+        "Enter on the picker profiles the selected thread"
+    );
+    assert_eq!(a.tab, FLAME, "and stays on the profile it is filling");
+    assert_eq!(a.flame_target.map(|t| t.pid), Some(pid));
+}
+
+#[test]
+fn a_profile_names_the_thread_it_is_of() {
+    let mut a = App::new(model::demo());
+    a.switch(FLAME);
+    a.flame_target = a.snapshot.telemetry.tasks.first().cloned();
+    let task = a.flame_target.clone().unwrap();
+    let screen = render(&a, 160, 52);
+    assert!(
+        screen.contains(&task.name) && screen.contains(&task.pid.to_string()),
+        "the view should name the thread whose stacks it draws"
+    );
+    assert!(screen.contains("TGID"), "and the process it belongs to");
+}
+
+#[test]
+fn profiling_again_returns_to_the_thread_list() {
     let mut a = App::new(model::demo());
     a.snapshot.demo = false;
     a.switch(FLAME);
+    a.flame_target = a.snapshot.telemetry.tasks.first().cloned();
+    assert!(!a.flame_picking());
     key(&mut a, KeyCode::Char('P'));
-    assert_eq!(a.tab, 1, "the profile itself has no thread list");
     assert!(
-        a.probe_request.is_none(),
-        "nothing is captured until one is picked"
+        a.flame_picking(),
+        "P offers the list again once one is chosen"
     );
 }

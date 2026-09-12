@@ -34,6 +34,12 @@ pub struct App {
     pub grouping: usize,
     /// Frames zoomed into on the Flame view, outermost first.
     pub flame_zoom: Vec<String>,
+    /// The thread a profile was requested for, so the view can say whose
+    /// stacks it draws rather than only how many.
+    pub flame_target: Option<crate::domain::Task>,
+    /// Set while the reader asked for the thread list back, so a profile that
+    /// is already drawn can still be replaced by another.
+    pub flame_choosing: bool,
     demo_host: crate::actions::DemoHost,
     timeline_frames: VecDeque<(usize, Snapshot)>,
     timeline_bytes: usize,
@@ -90,6 +96,8 @@ impl App {
             marked_modules: Default::default(),
             grouping: 0,
             flame_zoom: Vec::new(),
+            flame_target: None,
+            flame_choosing: false,
             demo_host: Default::default(),
             timeline_frames: VecDeque::new(),
             timeline_bytes: 0,
@@ -836,6 +844,7 @@ impl App {
         self.mode = 0;
         self.scope_cpu = None;
         self.flame_zoom.clear();
+        self.flame_choosing = false;
         if t == 10 {
             self.selected = self.visible_events().len().saturating_sub(1);
         }
@@ -1153,6 +1162,7 @@ impl App {
             }
             KeyCode::End => self.selected = self.row_count().saturating_sub(1),
             KeyCode::Enter => match self.tab {
+                13 if self.flame_picking() => self.profile_selected_task(),
                 13 => self.zoom_flame(),
                 0 | 12 => self.drill(match self.focus {
                     0 => 2,
@@ -1507,27 +1517,20 @@ impl App {
             // `: probe syscalls pid=TID seconds=30 stack`.
             // On the profile itself there is no thread list to select from, so
             // P goes to the one place a thread can be chosen.
+            // While the view offers threads it can start one itself; once it
+            // shows a profile, P goes back to choosing a different thread.
             KeyCode::Char('P') if self.tab == 13 => {
-                self.switch(1);
-                self.status = "Select a thread, then press P to profile it".into();
+                if self.flame_picking() {
+                    self.profile_selected_task();
+                } else {
+                    self.flame_target = None;
+                    self.flame_choosing = true;
+                    self.selected = 0;
+                    self.status = "Select a thread to profile".into();
+                }
             }
             KeyCode::Char('P') if self.tab == 1 || self.tab == 12 => {
-                match self.selected_task().map(|x| (x.pid, x.name.clone())) {
-                    _ if self.snapshot.demo || self.replay.is_some() => {
-                        self.status =
-                            "Stack capture requires live mode; this profile is fixture data".into()
-                    }
-                    Some((pid, name)) => {
-                        self.probe_request = Some(format!("syscalls pid={pid} seconds=30 stack"));
-                        self.switch(13);
-                        self.status = format!(
-                            "Profiling {name} TID {pid} for 30s; stacks appear as syscalls are made"
-                        );
-                    }
-                    None => {
-                        self.status = "Select a thread on Tasks to profile it, then press P".into()
-                    }
-                }
+                self.profile_selected_task();
             }
             KeyCode::Char('n') if self.tab == 9 => {
                 self.palette = true;
@@ -1543,6 +1546,30 @@ impl App {
     }
     fn table_focus(&self) -> bool {
         self.focus == 0 || (self.tab == 12 && self.focus == 6) || (self.tab == 0 && self.focus == 2)
+    }
+    /// True while the view is offering a thread to profile rather than a
+    /// profile to read.
+    pub fn flame_picking(&self) -> bool {
+        self.flame_choosing
+            || (self.flame_target.is_none() && self.snapshot.telemetry.profile.is_empty())
+    }
+    /// Request stacks for the selected thread and show the profile it fills.
+    pub fn profile_selected_task(&mut self) {
+        if self.snapshot.demo || self.replay.is_some() {
+            self.status = "Stack capture requires live mode; this profile is fixture data".into();
+            return;
+        }
+        let Some(task) = self.selected_task().cloned() else {
+            self.status = "Select a thread to profile it, then press P".into();
+            return;
+        };
+        let (pid, name) = (task.pid, task.name.clone());
+        self.probe_request = Some(format!("syscalls pid={pid} seconds=30 stack"));
+        self.switch(13);
+        self.flame_target = Some(task);
+        self.flame_choosing = false;
+        self.status =
+            format!("Profiling {name} TID {pid} for 30s; stacks appear as syscalls are made");
     }
     /// The zoomed frame's children: what selection moves between.
     pub fn flame_children(&self) -> usize {
@@ -1572,7 +1599,13 @@ impl App {
     }
     fn row_count(&self) -> usize {
         if self.tab == 13 {
-            return self.flame_children();
+            // Choosing a thread is what the empty view offers, so selection
+            // moves between threads until there is a profile to move within.
+            return if self.flame_picking() {
+                self.visible_tasks().len()
+            } else {
+                self.flame_children()
+            };
         }
         if self.tab == 3 && (self.focus == 3 || self.mode != 1) {
             self.memory_tasks().len()

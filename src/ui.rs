@@ -285,6 +285,14 @@ fn detail(f: &mut Frame, area: Rect, a: &App) {
         true,
     );
     let mut lines = Vec::new();
+    // Detail rows share one gutter so the values line up, instead of each row
+    // starting wherever its own name happened to end.
+    let pair = |key: &str, value: &str| {
+        Line::from(vec![
+            Span::styled(format!("{key:<20}"), Style::default().fg(DIM)),
+            Span::raw(value.to_owned()),
+        ])
+    };
     if a.capabilities_view {
         lines.push(Line::raw("Acquisition status · current snapshot"));
         for (source, quality) in &a.snapshot.telemetry.capabilities {
@@ -296,7 +304,7 @@ fn detail(f: &mut Frame, area: Rect, a: &App) {
                 .details
                 .get(&format!("source:{source}"))
             {
-                lines.extend(fields.iter().map(|(k, v)| Line::raw(format!("{k}: {v}"))));
+                lines.extend(fields.iter().map(|(k, v)| pair(k, v)));
             }
             lines.push(Line::raw(""));
         }
@@ -388,7 +396,7 @@ fn detail(f: &mut Frame, area: Rect, a: &App) {
                 .details
                 .get(&format!("task:{}", task.pid))
             {
-                lines.extend(fields.iter().map(|(k, v)| Line::raw(format!("{k}: {v}"))));
+                lines.extend(fields.iter().map(|(k, v)| pair(k, v)));
             }
         }
     }
@@ -403,7 +411,7 @@ fn detail(f: &mut Frame, area: Rect, a: &App) {
         if let Some(id) = rows.get(a.selected).and_then(|r| r.first()) {
             if let Some(fields) = a.snapshot.telemetry.details.get(&format!("{prefix}:{id}")) {
                 for (key, value) in fields {
-                    lines.push(Line::raw(format!("{key}: {value}")));
+                    lines.push(pair(key, value));
                 }
             }
         }
@@ -421,7 +429,7 @@ fn detail(f: &mut Frame, area: Rect, a: &App) {
             _ => "memory",
         };
         if let Some(fields) = a.snapshot.telemetry.details.get(key) {
-            lines.extend(fields.iter().map(|(k, v)| Line::raw(format!("{k}: {v}"))));
+            lines.extend(fields.iter().map(|(k, v)| pair(k, v)));
         }
         if key == "slab" {
             if let Some((name, _)) = a
@@ -432,32 +440,27 @@ fn detail(f: &mut Frame, area: Rect, a: &App) {
                 .and_then(|v| v.get(a.selected))
             {
                 if let Some(fields) = a.snapshot.telemetry.details.get(&format!("slab:{name}")) {
-                    lines.extend(fields.iter().map(|(k, v)| Line::raw(format!("{k}: {v}"))));
+                    lines.extend(fields.iter().map(|(k, v)| pair(k, v)));
                 }
             }
         }
     }
     if a.tab == 1 {
         if let Some(task) = a.selected_task() {
-            lines.push(Line::raw(format!(
-                "identity PID {} / TGID {} / start ticks {}",
-                task.pid, task.tgid, task.start_ticks
-            )));
-            lines.push(Line::raw(format!(
-                "affinity {} · policy {} · cgroup {}",
-                task.affinity, task.policy, task.cgroup
-            )));
-            lines.push(Line::raw(format!(
-                "wchan {} · verdict {}",
-                task.wchan, task.verdict
-            )));
+            lines.push(pair("PID / TGID", &format!("{} / {}", task.pid, task.tgid)));
+            lines.push(pair("start ticks", &task.start_ticks.to_string()));
+            lines.push(pair("affinity", &task.affinity));
+            lines.push(pair("policy", &task.policy));
+            lines.push(pair("cgroup", &task.cgroup));
+            lines.push(pair("wchan", &task.wchan));
+            lines.push(pair("verdict", &task.verdict));
             if let Some(fields) = a
                 .snapshot
                 .telemetry
                 .details
                 .get(&format!("offcpu:{}", task.pid))
             {
-                lines.extend(fields.iter().map(|(k, v)| Line::raw(format!("{k}: {v}"))));
+                lines.extend(fields.iter().map(|(k, v)| pair(k, v)));
             }
         }
     }
