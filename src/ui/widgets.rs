@@ -940,6 +940,7 @@ pub fn icicle(
     selected: usize,
     matching: &str,
 ) {
+    let total = cells.first().map(|root| root.samples);
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -965,7 +966,16 @@ pub fn icicle(
         } else {
             lerp(BG, tint, 0.18 + 0.05 * (cell.depth % 4) as f64)
         };
-        let label: Vec<char> = ellipsize(&cell.name, width as usize).chars().collect();
+        // Where a cell is wide enough, its share rides along, so two frames can
+        // be compared without selecting each in turn.
+        let share = total.map(|t: u64| cell.samples as f64 / t.max(1) as f64 * 100.);
+        let text = match share {
+            Some(share) if width as usize >= cell.name.chars().count() + 7 => {
+                format!("{} {share:.1}%", cell.name)
+            }
+            _ => cell.name.clone(),
+        };
+        let label: Vec<char> = ellipsize(&text, width as usize).chars().collect();
         for offset in 0..width {
             f.buffer_mut()
                 .get_mut(x + offset, y)

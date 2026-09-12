@@ -69,21 +69,26 @@ fn an_empty_profile_for_a_chosen_thread_explains_itself() {
 }
 
 #[test]
-fn zooming_narrows_to_the_selected_frame_and_escape_widens_again() {
+fn zooming_narrows_to_the_frame_under_the_cursor_and_escape_unwinds() {
     let mut a = App::new(model::demo());
     a.switch(FLAME);
-    assert!(a.flame_zoom.is_empty());
-    // The only child of the root is the process frame.
-    key(&mut a, KeyCode::Enter);
-    assert_eq!(a.flame_zoom, ["envoy_main"]);
-    // Selecting the heaviest child and zooming again goes one level deeper.
+    assert!(a.flame_zoom.is_empty() && a.flame_cursor.is_empty());
+    // Down walks into the heaviest callee, so two steps reach worker_loop.
+    key(&mut a, KeyCode::Down);
+    key(&mut a, KeyCode::Down);
+    assert_eq!(a.flame_path(), ["envoy_main", "worker_loop"]);
     key(&mut a, KeyCode::Enter);
     assert_eq!(a.flame_zoom, ["envoy_main", "worker_loop"]);
+    assert!(
+        a.flame_cursor.is_empty(),
+        "the zoomed frame becomes the root"
+    );
     let screen = render(&a, 160, 52);
     assert!(
-        screen.contains("envoy_main › worker_loop"),
-        "the panel title should show the path that was zoomed into"
+        screen.contains("envoy_main \u{203a} worker_loop"),
+        "the title shows the path that was zoomed into"
     );
+    // Esc unwinds the zoom one frame at a time.
     key(&mut a, KeyCode::Esc);
     assert_eq!(a.flame_zoom, ["envoy_main"]);
     key(&mut a, KeyCode::Esc);
@@ -91,30 +96,87 @@ fn zooming_narrows_to_the_selected_frame_and_escape_widens_again() {
 }
 
 #[test]
-fn selection_moves_between_the_zoomed_frames_children() {
+fn the_cursor_reads_the_picture_siblings_sideways_and_callees_downward() {
     let mut a = App::new(model::demo());
     a.switch(FLAME);
-    key(&mut a, KeyCode::Enter);
-    key(&mut a, KeyCode::Enter);
-    let children = a.flame_children();
-    assert!(children > 1, "worker_loop calls several frames");
+    // Down goes into a callee; the picture stacks callees below their caller.
     key(&mut a, KeyCode::Down);
-    assert_eq!(a.selected, 1);
-    // Selection stops at the last child rather than running past it.
-    for _ in 0..children + 5 {
-        key(&mut a, KeyCode::Down);
-    }
-    assert_eq!(a.selected, children - 1);
+    key(&mut a, KeyCode::Down);
+    key(&mut a, KeyCode::Down);
+    let deep = a.flame_path();
+    assert_eq!(
+        deep.len(),
+        3,
+        "three steps reach three frames deep: {deep:?}"
+    );
+    // Right and Left step between siblings, which sit side by side.
+    let before = a.flame_path();
+    key(&mut a, KeyCode::Right);
+    let after = a.flame_path();
+    assert_ne!(before, after, "Right moves to the next sibling");
+    assert_eq!(before.len(), after.len(), "and stays at the same depth");
+    key(&mut a, KeyCode::Left);
+    assert_eq!(a.flame_path(), before, "Left comes back");
+    // Up returns to the caller.
+    key(&mut a, KeyCode::Up);
+    assert_eq!(a.flame_path().len(), 2);
 }
 
 #[test]
-fn leaving_the_view_drops_the_zoom() {
+fn the_arrows_do_not_move_the_time_cursor_on_a_profile() {
+    // Left and Right rewind the clock everywhere else, which would swap the
+    // profile out from under the reader.
     let mut a = App::new(model::demo());
     a.switch(FLAME);
+    let before = a.cursor();
+    key(&mut a, KeyCode::Left);
+    key(&mut a, KeyCode::Right);
+    assert_eq!(a.cursor(), before);
+}
+
+#[test]
+fn one_key_reaches_the_hottest_path() {
+    let mut a = App::new(model::demo());
+    a.switch(FLAME);
+    key(&mut a, KeyCode::Char('h'));
+    let path = a.flame_path();
+    assert!(
+        path.len() >= 4,
+        "it follows the heaviest callee down: {path:?}"
+    );
+    let frame = a.flame_frame().expect("a frame");
+    assert!(frame.children.is_empty(), "and lands where the stack ends");
+    let screen = render(&a, 160, 52);
+    assert!(
+        screen.contains(&path.join(" \u{203a} ")),
+        "the panel shows the whole path to it"
+    );
+}
+
+#[test]
+fn any_frame_can_be_inspected_without_zooming_to_it() {
+    let mut a = App::new(model::demo());
+    a.switch(FLAME);
+    key(&mut a, KeyCode::Char('h'));
+    let deep = a.flame_frame().expect("a deep frame").name.clone();
+    assert!(
+        a.flame_zoom.is_empty(),
+        "inspecting is not zooming; the whole profile is still in view"
+    );
+    let screen = render(&a, 160, 52);
+    assert!(screen.contains(&deep), "and the panel describes that frame");
+}
+
+#[test]
+fn leaving_the_view_drops_the_zoom_and_the_cursor() {
+    let mut a = App::new(model::demo());
+    a.switch(FLAME);
+    key(&mut a, KeyCode::Down);
     key(&mut a, KeyCode::Enter);
     assert!(!a.flame_zoom.is_empty());
     a.switch(0);
     assert!(a.flame_zoom.is_empty(), "zoom is state of the flame view");
+    assert!(a.flame_cursor.is_empty());
 }
 
 #[test]

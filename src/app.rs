@@ -37,6 +37,16 @@ pub struct FlameSubject {
     pub busiest: String,
 }
 
+/// How the cursor moves over a profile.
+#[derive(Clone, Copy, Debug)]
+pub enum FlameMove {
+    Previous,
+    Next,
+    In,
+    Out,
+    Hottest,
+}
+
 pub struct App {
     pub capabilities_view: bool,
     pub reviewing_action: bool,
@@ -49,6 +59,10 @@ pub struct App {
     pub grouping: usize,
     /// Frames zoomed into on the Flame view, outermost first.
     pub flame_zoom: Vec<String>,
+    /// Child indices from the zoomed frame to the frame under the cursor. A
+    /// path rather than one index, so any frame can be inspected without
+    /// zooming through its ancestors first.
+    pub flame_cursor: Vec<usize>,
     /// The thread a profile was requested for, so the view can say whose
     /// stacks it draws rather than only how many.
     pub flame_target: Option<FlameSubject>,
@@ -111,6 +125,7 @@ impl App {
             marked_modules: Default::default(),
             grouping: 0,
             flame_zoom: Vec::new(),
+            flame_cursor: Vec::new(),
             flame_target: None,
             flame_choosing: false,
             demo_host: Default::default(),
@@ -958,6 +973,7 @@ impl App {
         self.mode = 0;
         self.scope_cpu = None;
         self.flame_zoom.clear();
+        self.flame_cursor.clear();
         self.flame_choosing = false;
         if t == 10 {
             self.selected = self.visible_events().len().saturating_sub(1);
@@ -1100,10 +1116,16 @@ impl App {
         self.switch(t);
     }
     fn back(&mut self) {
-        if self.tab == 13 && !self.flame_zoom.is_empty() {
-            self.flame_zoom.pop();
-            self.selected = 0;
-            return;
+        if self.tab == 13 && !self.flame_picking() {
+            // Esc unwinds the cursor first, then the zoom, then leaves.
+            if !self.flame_cursor.is_empty() {
+                self.flame_cursor.pop();
+                return;
+            }
+            if !self.flame_zoom.is_empty() {
+                self.flame_zoom.pop();
+                return;
+            }
         }
         if self.detail {
             self.detail = false;
@@ -1208,6 +1230,29 @@ impl App {
             }
             KeyCode::Char(']') => self.switch((self.tab + 1) % 13),
             KeyCode::Char('[') => self.switch((self.tab + 12) % 13),
+            KeyCode::Right | KeyCode::Left
+                if self.tab == 13 && !self.flame_picking() && !self.detail =>
+            {
+                self.flame_move(if k.code == KeyCode::Right {
+                    FlameMove::Next
+                } else {
+                    FlameMove::Previous
+                });
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if self.tab == 13 && !self.flame_picking() && !self.detail =>
+            {
+                self.flame_move(FlameMove::In);
+            }
+            KeyCode::Up | KeyCode::Char('k')
+                if self.tab == 13 && !self.flame_picking() && !self.detail =>
+            {
+                self.flame_move(FlameMove::Out);
+            }
+            KeyCode::Char('h') if self.tab == 13 && !self.flame_picking() => {
+                self.flame_move(FlameMove::Hottest);
+                self.status = "Followed the heaviest callee to the bottom".into();
+            }
             KeyCode::Right | KeyCode::Left => {
                 if let Some(frames) = &self.replay {
                     if k.code == KeyCode::Right {
@@ -1842,6 +1887,83 @@ impl App {
             .and_then(|x| x.cpu_pct)
             .unwrap_or(0.)
     }
+    /// The frame the cursor sits on, and how deep it is.
+    pub fn flame_frame(&self) -> Option<&crate::flame::Node> {
+        let mut node = self.snapshot.telemetry.profile.root.at(&self.flame_zoom)?;
+        for index in &self.flame_cursor {
+            node = node.children.get(*index)?;
+        }
+        Some(node)
+    }
+    /// Names from the zoomed frame down to the cursor.
+    pub fn flame_path(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        let Some(mut node) = self.snapshot.telemetry.profile.root.at(&self.flame_zoom) else {
+            return names;
+        };
+        for index in &self.flame_cursor {
+            let Some(child) = node.children.get(*index) else {
+                break;
+            };
+            names.push(child.name.clone());
+            node = child;
+        }
+        names
+    }
+    /// Move the cursor the way the picture reads: siblings side to side,
+    /// callers and callees up and down.
+    pub fn flame_move(&mut self, step: FlameMove) {
+        let root = self.snapshot.telemetry.profile.root.at(&self.flame_zoom);
+        let Some(root) = root else { return };
+        match step {
+            FlameMove::Out => {
+                self.flame_cursor.pop();
+            }
+            FlameMove::In => {
+                // Into the heaviest callee, which is where the time went.
+                if let Some(node) = self.flame_frame() {
+                    if !node.children.is_empty() {
+                        self.flame_cursor.push(0);
+                    }
+                }
+            }
+            FlameMove::Previous | FlameMove::Next => {
+                if self.flame_cursor.is_empty() {
+                    // Nothing to step between at the root; enter it instead.
+                    if !root.children.is_empty() {
+                        self.flame_cursor.push(0);
+                    }
+                    return;
+                }
+                let depth = self.flame_cursor.len() - 1;
+                let siblings = {
+                    let mut node = root;
+                    for index in &self.flame_cursor[..depth] {
+                        match node.children.get(*index) {
+                            Some(child) => node = child,
+                            None => return,
+                        }
+                    }
+                    node.children.len()
+                };
+                let at = self.flame_cursor[depth];
+                self.flame_cursor[depth] = match step {
+                    FlameMove::Previous => at.saturating_sub(1),
+                    _ => (at + 1).min(siblings.saturating_sub(1)),
+                };
+            }
+            FlameMove::Hottest => {
+                // Follow the heaviest callee to the bottom: the one move an
+                // investigation almost always starts with.
+                self.flame_cursor.clear();
+                let mut node = root;
+                while let Some(child) = node.children.first() {
+                    self.flame_cursor.push(0);
+                    node = child;
+                }
+            }
+        }
+    }
     /// The zoomed frame's children: what selection moves between.
     pub fn flame_children(&self) -> usize {
         self.snapshot
@@ -1852,21 +1974,15 @@ impl App {
             .map(|node| node.children.len())
             .unwrap_or(0)
     }
-    /// Zoom into the selected child frame.
+    /// Zoom to the frame under the cursor, whatever its depth.
     fn zoom_flame(&mut self) {
-        let Some(name) = self
-            .snapshot
-            .telemetry
-            .profile
-            .root
-            .at(&self.flame_zoom)
-            .and_then(|node| node.children.get(self.selected))
-            .map(|child| child.name.clone())
-        else {
+        let path = self.flame_path();
+        if path.is_empty() {
+            self.status = "Move to a frame first; Enter zooms to it".into();
             return;
-        };
-        self.flame_zoom.push(name);
-        self.selected = 0;
+        }
+        self.flame_zoom.extend(path);
+        self.flame_cursor.clear();
     }
     fn row_count(&self) -> usize {
         if self.tab == 13 {

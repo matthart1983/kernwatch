@@ -85,7 +85,7 @@ pub fn draw(f: &mut Frame, a: &App) {
             10 => "t source/time · c diagnosis · ↵ record",
             11 => "Tab evidence/action · ↵ inspect/preview · v verify",
             12 => "l task latency · P profile stacks · ↵ drill · [ ] views",
-            13 => "↵ zoom · Esc widen · P subject · x stop · g process/thread",
+            13 => "←→ sibling · ↑↓ caller/callee · h hottest · ↵ zoom · P subject",
             _ => "↵ drill · [ ] views",
         }
     };

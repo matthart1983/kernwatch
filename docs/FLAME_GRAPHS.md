@@ -105,9 +105,23 @@ which means rebuilding `probes/kernwatch.bpf.o` with a BPF-capable Clang.
 
 ## Reading the view
 
-- `↑` `↓` select among the zoomed frame's children. Selection walks the tree,
-  not the drawn cells, so it does not change with terminal width.
-- `Enter` zooms into the selected frame; `Esc` widens one level, then leaves.
+The cursor reads the picture, and can sit on any frame without zooming to it:
+
+- `←` `→` step between siblings, which are drawn side by side.
+- `↓` goes into the heaviest callee, `↑` back to the caller.
+- `h` follows the heaviest callee all the way down — where an investigation
+  usually starts.
+- `Enter` zooms to the frame under the cursor, making it the root; `Esc`
+  unwinds the cursor, then the zoom, then leaves the view.
+
+Arrow keys move the time cursor everywhere else in kernwatch. They do not here:
+rewinding the clock would swap the profile out from under the reader.
+
+The panel under the graph leads with the frame the cursor is on — its share,
+what it keeps for itself, its heaviest callee, and the whole path to it — and
+the subject and its caveats follow. Frames wide enough carry their share in the
+graph itself, so two can be compared without selecting each in turn.
+
 - `/` searches; every frame whose name matches is marked wherever it appears,
   and the subtitle counts the matches and the stacks passing through them.
 - `P` chooses another subject; `x` stops a running capture and keeps what it

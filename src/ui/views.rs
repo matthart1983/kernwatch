@@ -3367,7 +3367,7 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
         f,
         bands[0],
         format!(
-            " ↵ zoom · Esc widen · ↑↓ select · / find frame · P new subject · x stop{}",
+            " ←→ sibling · ↓ callee · ↑ caller · h hottest · ↵ zoom · Esc back · / find{}",
             if a.snapshot.demo {
                 " · demo fixture"
             } else {
@@ -3416,14 +3416,12 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
     };
     let area = p(f, bands[1], a, 1, &title, &subtitle);
     let cells = crate::flame::layout(root, area.width, area.height);
-    let chosen = root.children.get(a.selected).map(|c| c.name.as_str());
-    let selected = chosen
-        .and_then(|name| {
-            cells
-                .cells
-                .iter()
-                .position(|c| c.depth == 1 && c.name == name)
-        })
+    // The cursor can sit on any frame, so the highlighted cell is the one
+    // whose path matches it rather than a child of the root.
+    let selected = cells
+        .cells
+        .iter()
+        .position(|c| c.path == a.flame_cursor)
         .unwrap_or(usize::MAX);
     if profile.is_empty() {
         text(
@@ -3435,24 +3433,51 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
         icicle(f, area, &cells.cells, selected, &a.filter.to_lowercase());
     }
     let detail = p(f, bands[2], a, 2, "subject / frame", "syscall-entry stacks");
-    let mut fields = flame_subject_fields(a);
-    if let Some(node) = root.children.get(a.selected) {
-        let share = node.samples as f64 / root.samples.max(1) as f64 * 100.;
-        fields.push((String::new(), String::new()));
-        fields.push(("frame".into(), node.name.clone()));
-        fields.push((
-            "samples".into(),
-            format!("{} · {share:.1}% of {}", node.samples, root.name),
-        ));
-        fields.push((
-            "in this frame".into(),
-            format!("{} not accounted for by callees", node.own()),
-        ));
-        fields.push(("called frames".into(), node.children.len().to_string()));
-        if selected == usize::MAX {
+    // Lead with the frame under the cursor: that is what the reader is
+    // investigating. The subject and its caveats follow it.
+    let mut fields = Vec::new();
+    match a.flame_frame() {
+        Some(node) if !a.flame_cursor.is_empty() => {
+            let share = node.samples as f64 / root.samples.max(1) as f64 * 100.;
+            fields.push(("frame".into(), node.name.clone()));
             fields.push((
-                "drawn".into(),
-                "no; this frame is narrower than one column".into(),
+                "stacks".into(),
+                format!("{} · {share:.1}% of {}", node.samples, root.name),
+            ));
+            fields.push((
+                "in this frame".into(),
+                format!(
+                    "{} not accounted for by callees ({:.1}%)",
+                    node.own(),
+                    node.own() as f64 / root.samples.max(1) as f64 * 100.
+                ),
+            ));
+            fields.push((
+                "callees".into(),
+                if node.children.is_empty() {
+                    "none; this is where the stack ends".into()
+                } else {
+                    let heaviest = &node.children[0];
+                    format!(
+                        "{} · heaviest {} at {:.1}%",
+                        node.children.len(),
+                        heaviest.name,
+                        heaviest.samples as f64 / node.samples.max(1) as f64 * 100.
+                    )
+                },
+            ));
+            fields.push(("path".into(), a.flame_path().join(" › ")));
+            if selected == usize::MAX {
+                fields.push((
+                    "drawn".into(),
+                    "no; this frame is narrower than one column".into(),
+                ));
+            }
+        }
+        _ => {
+            fields.push((
+                "frame".into(),
+                "none selected — ↓ enters the profile, h jumps to the hottest path".into(),
             ));
         }
     }
@@ -3465,6 +3490,8 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
             ),
         ));
     }
+    fields.push((String::new(), String::new()));
+    fields.extend(flame_subject_fields(a));
     fields_widget(f, detail, &fields, 0);
 }
 

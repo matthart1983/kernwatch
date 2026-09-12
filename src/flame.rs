@@ -139,6 +139,9 @@ pub struct Placed {
     pub samples: u64,
     /// Set on the cell standing in for siblings too narrow to draw.
     pub folded: u64,
+    /// Child indices from the laid-out root, so a cursor over the tree can be
+    /// matched to the cell that draws it.
+    pub path: Vec<usize>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -157,11 +160,19 @@ pub fn layout(root: &Node, width: u16, depth_limit: u16) -> Layout {
     if width == 0 || depth_limit == 0 || root.samples == 0 {
         return out;
     }
-    place(root, 0, width, 0, depth_limit, &mut out);
+    place(root, 0, width, 0, depth_limit, &mut Vec::new(), &mut out);
     out
 }
 
-fn place(node: &Node, x: u16, width: u16, depth: u16, limit: u16, out: &mut Layout) {
+fn place(
+    node: &Node,
+    x: u16,
+    width: u16,
+    depth: u16,
+    limit: u16,
+    path: &mut Vec<usize>,
+    out: &mut Layout,
+) {
     out.cells.push(Placed {
         depth,
         x,
@@ -169,6 +180,7 @@ fn place(node: &Node, x: u16, width: u16, depth: u16, limit: u16, out: &mut Layo
         name: node.name.clone(),
         samples: node.samples,
         folded: 0,
+        path: path.clone(),
     });
     if depth + 1 >= limit || width == 0 || node.children.is_empty() {
         return;
@@ -177,7 +189,7 @@ fn place(node: &Node, x: u16, width: u16, depth: u16, limit: u16, out: &mut Layo
     let mut consumed = 0u16;
     let mut narrow = 0u64;
     let mut narrow_frames = 0u64;
-    for child in &node.children {
+    for (index, child) in node.children.iter().enumerate() {
         // Each width is measured against the parent on its own, never against
         // the running total. Accumulating would let rounding hand a cell to
         // whichever equal sibling happened to be last, and hide the rest.
@@ -188,7 +200,17 @@ fn place(node: &Node, x: u16, width: u16, depth: u16, limit: u16, out: &mut Layo
             narrow_frames += 1;
             continue;
         }
-        place(child, x + consumed, child_width, depth + 1, limit, out);
+        path.push(index);
+        place(
+            child,
+            x + consumed,
+            child_width,
+            depth + 1,
+            limit,
+            path,
+            out,
+        );
+        path.pop();
         consumed += child_width;
     }
     // The gap left by this frame's own samples is where a stand-in can go.
@@ -202,6 +224,7 @@ fn place(node: &Node, x: u16, width: u16, depth: u16, limit: u16, out: &mut Layo
                 name: "…".into(),
                 samples: narrow,
                 folded: narrow_frames,
+                path: path.clone(),
             });
         } else {
             out.hidden += narrow_frames;
