@@ -194,15 +194,15 @@ impl Probes {
         };
         let target_clock_hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
         let mut bpf = aya::EbpfLoader::new()
-            .set_max_entries("profile_counts", entries)
-            .set_max_entries("stacks", entries)
-            .set_global("target_start_ticks", &target_start_ticks, true)
-            .set_global("target_clock_hz", &target_clock_hz, true)
-            .set_global("target_tgid", &tgid, true)
-            .set_global("sample_tid", &pid, true)
-            .set_global("capture_stack", &capture_stack, true)
-            .set_global("target_pid", &pid, true)
-            .set_global("target_cgroup", &cgroup, true)
+            .map_max_entries("profile_counts", entries)
+            .map_max_entries("stacks", entries)
+            .override_global("target_start_ticks", &target_start_ticks, true)
+            .override_global("target_clock_hz", &target_clock_hz, true)
+            .override_global("target_tgid", &tgid, true)
+            .override_global("sample_tid", &pid, true)
+            .override_global("capture_stack", &capture_stack, true)
+            .override_global("target_pid", &pid, true)
+            .override_global("target_cgroup", &cgroup, true)
             .load(object)
             .map_err(err)?;
         let mut owned_attachments = BTreeMap::new();

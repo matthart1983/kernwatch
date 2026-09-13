@@ -220,7 +220,7 @@ pub fn table(
                 .style(Style::default().fg(DIM))
                 .bottom_margin(1),
             )
-            .highlight_style(Style::default().bg(SELECT))
+            .row_highlight_style(Style::default().bg(SELECT))
             .column_spacing(1),
         area,
         &mut state,
@@ -324,8 +324,7 @@ pub fn dots(
                 } else {
                     lerp(BG, color, 0.45 + height * 0.55)
                 };
-                f.buffer_mut()
-                    .get_mut(area.x + x as u16, area.y + y as u16)
+                f.buffer_mut()[(area.x + x as u16, area.y + y as u16)]
                     .set_char(char::from_u32(0x2800 + bits).unwrap())
                     .set_style(Style::default().fg(fg).bg(BG));
             }
@@ -394,8 +393,7 @@ pub fn meter(f: &mut Frame, area: Rect, value: f64, max: f64, color: Color) {
     }
     let filled = ((value / max.max(1.)).clamp(0., 1.) * area.width as f64).round() as u16;
     for x in 0..area.width {
-        f.buffer_mut()
-            .get_mut(area.x + x, area.y)
+        f.buffer_mut()[(area.x + x, area.y)]
             .set_char('▄')
             .set_fg(if x < filled {
                 lerp(BG, color, 0.45 + 0.55 * x as f64 / area.width.max(1) as f64)
@@ -534,7 +532,7 @@ mod irq_alignment_tests {
             .draw(|f| {
                 table(
                     f,
-                    f.size(),
+                    f.area(),
                     &["IRQ", "Name", "Rate"],
                     &[vec!["7".into(), "short".into(), "8".into()]],
                     &[1, 1, 1],
@@ -543,9 +541,9 @@ mod irq_alignment_tests {
             })
             .unwrap();
         let b = terminal.backend().buffer();
-        assert_eq!(b.get(9, 0).symbol(), "Q");
-        assert_eq!(b.get(9, 2).symbol(), "7");
-        assert_eq!(b.get(29, 2).symbol(), "8");
+        assert_eq!(b[(9, 0)].symbol(), "Q");
+        assert_eq!(b[(9, 2)].symbol(), "7");
+        assert_eq!(b[(29, 2)].symbol(), "8");
     }
 }
 
@@ -570,13 +568,11 @@ mod timeline_spacing_tests {
     }
     fn plotted_columns(s: &Series, cursor: u64) -> Vec<u16> {
         let mut t = Terminal::new(TestBackend::new(61, 1)).unwrap();
-        t.draw(|f| history_window(f, f.size(), Some(s), cursor, CYAN, false, 60))
+        t.draw(|f| history_window(f, f.area(), Some(s), cursor, CYAN, false, 60))
             .unwrap();
         (0..61)
             .filter(|x| {
-                t.backend()
-                    .buffer()
-                    .get(*x, 0)
+                t.backend().buffer()[(*x, 0)]
                     .symbol()
                     .chars()
                     .any(|c| ('\u{2801}'..='\u{28ff}').contains(&c))
@@ -588,14 +584,12 @@ mod timeline_spacing_tests {
         let mut s = series(&(0..=120).map(|i| (i * 1000, Some(5.))).collect::<Vec<_>>());
         let origin = |s: &Series| {
             let mut t = Terminal::new(TestBackend::new(80, 8)).unwrap();
-            t.draw(|f| super::graph(f, f.size(), Some(s), None, 120_000))
+            t.draw(|f| super::graph(f, f.area(), Some(s), None, 120_000))
                 .unwrap();
             (0..80)
                 .find(|x| {
                     (0..6).any(|y| {
-                        t.backend()
-                            .buffer()
-                            .get(*x, y)
+                        t.backend().buffer()[(*x, y)]
                             .symbol()
                             .chars()
                             .any(|c| ('\u{2801}'..='\u{28ff}').contains(&c))
@@ -675,7 +669,7 @@ mod redraw_tests {
         let render = |s: &Series| {
             let mut terminal = Terminal::new(TestBackend::new(61, 8)).unwrap();
             terminal
-                .draw(|f| history(f, f.size(), Some(s), 60000, CYAN, false))
+                .draw(|f| history(f, f.area(), Some(s), 60000, CYAN, false))
                 .unwrap();
             terminal.backend().buffer().clone()
         };
@@ -686,8 +680,8 @@ mod redraw_tests {
         for x in 0..60 {
             for y in 0..8 {
                 assert_eq!(
-                    before.get(x, y),
-                    after.get(x, y),
+                    before[(x, y)],
+                    after[(x, y)],
                     "completed column {x}, row {y} changed"
                 );
             }
@@ -717,8 +711,8 @@ mod redraw_tests {
             let mut terminal = Terminal::new(TestBackend::new(10, 4)).unwrap();
             terminal
                 .draw(|f| {
-                    dots(f, f.size(), &[Some(10.)], 10., CYAN, false, false);
-                    dots(f, f.size(), &values, 10., CYAN, false, false);
+                    dots(f, f.area(), &[Some(10.)], 10., CYAN, false, false);
+                    dots(f, f.area(), &values, 10., CYAN, false, false);
                 })
                 .unwrap();
             assert!(terminal
@@ -736,7 +730,7 @@ mod redraw_tests {
             .draw(|f| {
                 dots(
                     f,
-                    f.size(),
+                    f.area(),
                     &[Some(10.), Some(10.), Some(90.), Some(90.)],
                     100.,
                     CYAN,
@@ -745,8 +739,8 @@ mod redraw_tests {
                 )
             })
             .unwrap();
-        assert_eq!(terminal.backend().buffer().get(0, 0).fg, GREEN);
-        assert_eq!(terminal.backend().buffer().get(1, 0).fg, RED);
+        assert_eq!(terminal.backend().buffer()[(0, 0)].fg, GREEN);
+        assert_eq!(terminal.backend().buffer()[(1, 0)].fg, RED);
     }
     #[test]
     fn changing_current_card_alarm_does_not_recolor_history() {
@@ -761,10 +755,10 @@ mod redraw_tests {
         let render = |warn| {
             let mut terminal = Terminal::new(TestBackend::new(30, 6)).unwrap();
             terminal
-                .draw(|f| card(f, f.size(), "test", "40%", "", Some(&series), 1000, warn))
+                .draw(|f| card(f, f.area(), "test", "40%", "", Some(&series), 1000, warn))
                 .unwrap();
             (0..30)
-                .map(|x| terminal.backend().buffer().get(x, 4).clone())
+                .map(|x| terminal.backend().buffer()[(x, 4)].clone())
                 .collect::<Vec<_>>()
         };
         assert_eq!(render(false), render(true));
@@ -796,15 +790,15 @@ mod fixed_sample_width_tests {
         for width in [5, 12, 61, 120, 240] {
             let mut terminal = Terminal::new(TestBackend::new(width, 4)).unwrap();
             terminal
-                .draw(|f| history(f, f.size(), Some(&series), 103900, CYAN, false))
+                .draw(|f| history(f, f.area(), Some(&series), 103900, CYAN, false))
                 .unwrap();
             let columns: Vec<_> = (0..width)
-                .filter(|x| terminal.backend().buffer().get(*x, 0).symbol() != " ")
+                .filter(|x| terminal.backend().buffer()[(*x, 0)].symbol() != " ")
                 .collect();
             assert_eq!(columns, vec![width - 4, width - 1], "width {width}");
             for x in columns {
                 for y in 0..4 {
-                    assert_eq!(terminal.backend().buffer().get(x, y).symbol(), "⣿");
+                    assert_eq!(terminal.backend().buffer()[(x, y)].symbol(), "⣿");
                 }
             }
         }
@@ -862,10 +856,10 @@ mod insufficient_history_tests {
         };
         for width in [12, 80, 240] {
             let mut t = Terminal::new(TestBackend::new(width, 4)).unwrap();
-            t.draw(|f| series_plot(f, f.size(), Some(&s), 2100, CYAN, false, false, 600))
+            t.draw(|f| series_plot(f, f.area(), Some(&s), 2100, CYAN, false, false, 600))
                 .unwrap();
             let columns: Vec<_> = (0..width)
-                .filter(|x| (0..4).any(|y| t.backend().buffer().get(*x, y).symbol() != " "))
+                .filter(|x| (0..4).any(|y| t.backend().buffer()[(*x, y)].symbol() != " "))
                 .collect();
             assert_eq!(columns, vec![width - 3, width - 1]);
         }
@@ -887,17 +881,17 @@ mod insufficient_history_tests {
             ..Default::default()
         };
         let mut cpu = Terminal::new(TestBackend::new(97, 6)).unwrap();
-        cpu.draw(|f| graph(f, f.size(), Some(&s), None, 2100))
+        cpu.draw(|f| graph(f, f.area(), Some(&s), None, 2100))
             .unwrap();
         let mut history_plot = Terminal::new(TestBackend::new(80, 4)).unwrap();
         history_plot
-            .draw(|f| history(f, f.size(), Some(&s), 2100, CYAN, false))
+            .draw(|f| history(f, f.area(), Some(&s), 2100, CYAN, false))
             .unwrap();
         for x in 0..80 {
             for y in 0..4 {
                 assert_eq!(
-                    cpu.backend().buffer().get(16 + x, y),
-                    history_plot.backend().buffer().get(x, y)
+                    cpu.backend().buffer()[(16 + x, y)],
+                    history_plot.backend().buffer()[(x, y)]
                 );
             }
         }
@@ -991,8 +985,7 @@ pub fn icicle(
         };
         let label: Vec<char> = ellipsize(&text, width as usize).chars().collect();
         for offset in 0..width {
-            f.buffer_mut()
-                .get_mut(x + offset, y)
+            f.buffer_mut()[(x + offset, y)]
                 .set_char(label.get(offset as usize).copied().unwrap_or(' '))
                 .set_style(Style::default().fg(readable_on(background)).bg(background));
         }

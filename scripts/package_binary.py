@@ -14,7 +14,7 @@ stage.mkdir(exist_ok=True)
 shutil.copy2(binary, stage / asset)
 archive = output / (asset + '.tar.gz')
 files = [(stage / asset, asset), (Path('LICENSE'), 'LICENSE'), (Path('README.md'), 'README.md')]
-files.extend((Path('vendor/cpp_demangle') / name, 'licenses/cpp_demangle-' + name) for name in ['LICENSE-MIT', 'LICENSE-APACHE'])
+files.extend((Path('licenses') / ('cpp_demangle-' + name), 'licenses/cpp_demangle-' + name) for name in ['LICENSE-MIT', 'LICENSE-APACHE'])
 provenance = Path('probes/provenance.json')
 if provenance.exists():
     files.append((provenance, 'bpf-provenance.json'))

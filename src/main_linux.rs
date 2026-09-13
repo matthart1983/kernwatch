@@ -151,7 +151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let buffer = term.backend().buffer();
         for y in 0..h {
             let line = (0..w)
-                .map(|x| buffer.get(x, y).symbol())
+                .map(|x| buffer[(x, y)].symbol())
                 .collect::<String>();
             println!("{}", line.trim_end());
         }
