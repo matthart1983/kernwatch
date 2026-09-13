@@ -7,8 +7,7 @@ use aya::{
     maps::{HashMap as BpfHashMap, MapData, PerCpuArray, PerCpuHashMap, StackTraceMap},
     programs::{
         perf_event::{
-            perf_sw_ids::PERF_COUNT_SW_CPU_CLOCK, PerfEventLinkId, PerfEventScope, PerfTypeId,
-            SamplePolicy,
+            PerfEventConfig, PerfEventLinkId, PerfEventScope, SamplePolicy, SoftwareEvent,
         },
         PerfEvent,
     },
@@ -109,8 +108,7 @@ impl Sampler {
             if let std::collections::btree_map::Entry::Vacant(entry) = self.links.entry(cpu) {
                 let link = program
                     .attach(
-                        PerfTypeId::Software,
-                        PERF_COUNT_SW_CPU_CLOCK as u64,
+                        PerfEventConfig::Software(SoftwareEvent::CpuClock),
                         PerfEventScope::AllProcessesOneCpu { cpu },
                         SamplePolicy::Frequency(self.hz),
                         false,

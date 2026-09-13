@@ -378,7 +378,7 @@ pub fn demangle(name: &str) -> String {
         return format!("{symbol:#}");
     }
     if let Ok(symbol) = cpp_demangle::Symbol::new(name) {
-        if let Ok(name) = symbol.demangle(&cpp_demangle::DemangleOptions::default()) {
+        if let Ok(name) = symbol.demangle() {
             return name;
         }
     }
