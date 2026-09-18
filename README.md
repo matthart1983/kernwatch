@@ -1,6 +1,15 @@
-# kernwatch
-
-**Linux kernel observability, in your terminal.**
+<p align="center">
+  <h1 align="center">kernwatch</h1>
+  <p align="center">
+    <strong>Linux kernel observability, in your terminal.</strong>
+  </p>
+  <p align="center">
+    <a href="https://github.com/matthart1983/kernwatch/releases"><img src="https://img.shields.io/github/v/release/matthart1983/kernwatch" alt="Release"></a>
+    <a href="https://github.com/matthart1983/kernwatch/releases"><img src="https://img.shields.io/github/downloads/matthart1983/kernwatch/total.svg" alt="Downloads"></a>
+    <img src="https://img.shields.io/badge/platform-Linux%20x86--64%20%7C%20ARM64-blue" alt="Platform">
+    <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
+  </p>
+</p>
 
 kernwatch is a Rust + Ratatui monitor for investigating CPU contention, task scheduling, memory pressure, block I/O, interrupts, cgroups, kernel modules, and eBPF activity. Fourteen connected views bring live counters, bounded tracing, timelines, stack profiles, and incident evidence into one keyboard-driven interface.
 
