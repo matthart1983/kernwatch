@@ -12,11 +12,11 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/matthart1983/kernwatch/main/screenshots/demo/kernwatch-profiling.gif" alt="kernwatch CPU profiling: capture stacks, save a baseline and compare workloads" width="900">
+  <img src="https://raw.githubusercontent.com/matthart1983/kernwatch/main/screenshots/demo/kernwatch-flame.gif" alt="kernwatch flame graph: capture stacks, follow the hottest path, zoom, search and compare two captures" width="900">
 </p>
 
 <p align="center">
-  <em>Real CPU samples from a bounded workload in a Linux VM; not a performance benchmark.</em>
+  <em>Real CPU samples from a purpose-built demo workload in a Linux VM; not a performance benchmark.</em>
 </p>
 
 Investigate CPU contention, scheduling, memory pressure, block IO and interrupts.

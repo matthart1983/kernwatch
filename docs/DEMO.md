@@ -1,8 +1,10 @@
 # Review the kernwatch demo
 
-kernwatch has three previews. The README leads with **real CPU profiling in a
-disposable Linux VM**, followed by a collapsible **live-host overview**. The
-**guided demo** below uses a synthetic incident and runs without host probes.
+kernwatch has four previews. The README leads with the **flame graph preview**,
+recorded in a disposable Linux VM. The **profiling preview** records the same
+capture and comparison flow with a simpler workload, and the **live-host overview**
+records a real host. The **guided demo** below uses a synthetic incident and runs
+without host probes.
 
 ## Record the profiling preview
 
@@ -35,6 +37,28 @@ before publishing it. This is a controlled feature demonstration, not an
 overhead benchmark; different capture lengths and stack failures remain visible.
 
 ![A real baseline comparison in the recording VM](../screenshots/demo/profiling-comparison.png)
+
+## Record the flame graph preview
+
+```sh
+python3 scripts/profile_demo.py --flame
+```
+
+This uses the same VM and requirements, with `examples/webapp.rs` as the workload.
+`webapp` is a purpose-built program, not a real service. Its function names are
+chosen to read well, but the samples and kernel frames are real: three threads
+burn CPU in a request path with recursive rendering, a compactor that writes to a
+file, and a light metrics thread.
+
+The sequence captures the process, follows the hottest path with **h**, zooms into
+`handle_request`, walks its callees, unwinds the zoom, and searches for a frame.
+It then retains a baseline, exports it, and compares a second capture. As in the
+profiling preview, that export switches the workload from cache-heavy to
+parse-heavy. The recording cuts VM boot and the start of the second capture.
+
+The script runs the profiling preview's checks and also requires frames from the
+recursive path, the compactor, and the kernel write path. The output is
+`screenshots/demo/kernwatch-flame.gif`.
 
 ## Record the live preview
 
