@@ -1,3 +1,16 @@
+## kernwatch v0.4.1
+
+Updates the terminal UI, terminal input, BPF loader, and C++ demangler dependencies while preserving the existing Rust edition and release optimisation settings.
+
+- Upgrade Ratatui 0.27.0 to 0.30.2, Crossterm 0.27.0 to 0.29.0, Aya 0.13.1 to 0.14.0, and cpp_demangle 0.4.5 to 0.5.1; refresh compatible transitive dependencies.
+- Migrate terminal rendering, BPF loader configuration, CPU sampling attachment, and demangling calls to the current APIs.
+- Use the published cpp_demangle crate instead of the temporary vendored source. Release archives retain its MIT and Apache licences.
+- Keep optional Ratatui features limited to the terminal backend, layout cache, and underline colours used by Kernwatch.
+
+Addresses the dependency-update portion of [issue #1](https://github.com/matthart1983/kernwatch/issues/1). Binary stripping, LTO settings, and the edition 2024 migration are outside this patch.
+
+Release validation covers formatting, Clippy, unit/integration tests, terminal and recording/replay smoke tests, and Linux x86-64/ARM64 glibc and musl builds. The probe workflow verifies embedded BPF objects and exercises live CPU sampling on x86-64 and ARM64.
+
 ## kernwatch v0.4.0
 
 Adds real CPU profiling to the Flame view. Press **F**, select a process, and press **Enter** to capture a 30-second profile at 49 Hz. CPU sampling sees busy loops without syscalls and supports process-wide, thread-only, and system-wide capture. Syscall-entry profiling remains available as a separate mode.

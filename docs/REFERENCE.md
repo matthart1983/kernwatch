@@ -246,4 +246,3 @@ The pre-rename baseline passed tracing tests on Linux x86-64 kernels **6.19.10**
 Remaining work includes user-stack symbolization, allocation and module-loader attribution, a supported interactive tracefs fallback, BPF map occupancy/FD-holder attribution, and cross-suspend alignment of historical log timestamps. CPU/runtime counters cannot reconstruct missing historical events or establish causality on their own.
 
 See the [Syscalls/eBPF review](SYSCALL_EBPF_REVIEW.md) for the latest tab findings and the [gap audit](GAPS.md) for scope and the [specification](SPEC.md) for the intended product.
-
