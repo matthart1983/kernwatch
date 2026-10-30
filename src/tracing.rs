@@ -347,11 +347,7 @@ impl Correlator {
                 task.wake_p99_ms = values.percentile(0.99);
             }
         }
-        let all = self
-            .wake_cpu
-            .values()
-            .flatten()
-            .collect::<Vec<_>>();
+        let all = self.wake_cpu.values().flatten().collect::<Vec<_>>();
         if let Some(p99) = percentile(&all, 0.99) {
             t.metrics.insert(
                 "sched.p99".into(),

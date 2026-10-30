@@ -1,3 +1,16 @@
+## kernwatch v0.5.0
+
+Stops kernwatch's own cost from growing the longer it runs. Before this release, CPU and memory climbed with retained history, so a monitor left open kept getting more expensive.
+
+- Share history between snapshots instead of copying it, and count profile symbols against the timeline budget. On the reference host, RSS moved 1.7 MiB over the 21 minutes after the 600-sample history filled.
+- Run metadata helpers on demand instead of on a timer. `scripts/monitor_bench.py` now counts live helper processes as observer CPU.
+- Build a large profile comparison once and reuse it. Scrolling and filtering no longer rebuild it, and a finished capture no longer redraws unchanged data. On the 8,192-path stress profiles, a redraw takes under 1 ms, down from 154 ms and 417 ms.
+- Keep latency samples in a bounded window that drops the oldest in constant time, and bound CPU count-map scans.
+- `profile-baseline off` releases a retained baseline. Status changes now redraw while the view is frozen.
+- Add `--version`, `SECURITY.md` and a release guard that refuses a tag unless it matches the crate version and is on main. Release pages now show only their own notes.
+
+Full figures and their limits are in the [performance review](https://github.com/matthart1983/kernwatch/blob/v0.5.0/docs/PERFORMANCE_REVIEW.md).
+
 ## kernwatch v0.4.1
 
 Updates the terminal UI, terminal input, BPF loader, and C++ demangler dependencies while preserving the existing Rust edition and release optimisation settings.

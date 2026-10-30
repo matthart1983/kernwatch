@@ -20,7 +20,18 @@ defaults:
 env:
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.sha }}
+          fetch-depth: 0
+      - name: Tag is the release, and on main
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        run: bash scripts/release-guard.sh "$RELEASE_TAG"
   probes:
+    needs: guard
     uses: ./.github/workflows/probes.yml
     with:
       ref: ${{ inputs.tag || github.sha }}
@@ -136,5 +147,8 @@ jobs:
           cd dist
           sha256sum --check ./*.sha256
           cat ./*.sha256 > SHA256SUMS
-          gh release create "$RELEASE_TAG" --verify-tag --draft --title "kernwatch $RELEASE_TAG" --notes-file ../docs/RELEASE_NOTES.md ./*.tar.gz ./*.sha256 SHA256SUMS
+          # Only this release's section; the file keeps every earlier one.
+          awk -v h="## kernwatch $RELEASE_TAG" '$0 == h { keep = 1; next } /^## / { keep = 0 } keep' ../docs/RELEASE_NOTES.md > ../release-notes.md
+          [ -s ../release-notes.md ] || { echo "::error::no notes for $RELEASE_TAG"; exit 1; }
+          gh release create "$RELEASE_TAG" --verify-tag --draft --title "kernwatch $RELEASE_TAG" --notes-file ../release-notes.md ./*.tar.gz ./*.sha256 SHA256SUMS
           gh release edit "$RELEASE_TAG" --draft=false

@@ -747,11 +747,7 @@ impl Probes {
             ),
             (
                 "syscall",
-                self.correlator
-                    .syscall_ms
-                    .values()
-                    .flatten()
-                    .collect(),
+                self.correlator.syscall_ms.values().flatten().collect(),
             ),
             ("block", self.block_ms.iter().collect::<Vec<_>>()),
         ] {
@@ -835,9 +831,7 @@ impl Probes {
                 vec![
                     (
                         "p99".into(),
-                        values.percentile(0.99)
-                            .unwrap_or(0.)
-                            .to_string(),
+                        values.percentile(0.99).unwrap_or(0.).to_string(),
                     ),
                     ("sample count".into(), values.len().to_string()),
                     (
@@ -860,12 +854,7 @@ impl Probes {
                     20.,
                 );
             }
-            t.record(
-                &format!("task.{pid}"),
-                values.percentile(0.99),
-                "ms",
-                20.,
-            );
+            t.record(&format!("task.{pid}"), values.percentile(0.99), "ms", 20.);
             t.details.insert(
                 format!("wake:{pid}"),
                 vec![
@@ -884,15 +873,11 @@ impl Probes {
                     ),
                     (
                         "p50".into(),
-                        values.percentile(0.5)
-                            .unwrap_or(0.)
-                            .to_string(),
+                        values.percentile(0.5).unwrap_or(0.).to_string(),
                     ),
                     (
                         "p99".into(),
-                        values.percentile(0.99)
-                            .unwrap_or(0.)
-                            .to_string(),
+                        values.percentile(0.99).unwrap_or(0.).to_string(),
                     ),
                 ],
             );
@@ -909,15 +894,11 @@ impl Probes {
                 vec![
                     (
                         "p50".into(),
-                        values.percentile(0.5)
-                            .unwrap_or(0.)
-                            .to_string(),
+                        values.percentile(0.5).unwrap_or(0.).to_string(),
                     ),
                     (
                         "p99".into(),
-                        values.percentile(0.99)
-                            .unwrap_or(0.)
-                            .to_string(),
+                        values.percentile(0.99).unwrap_or(0.).to_string(),
                     ),
                 ],
             );
@@ -968,14 +949,8 @@ impl Probes {
                         "{:.6}ms",
                         values.iter().sum::<f64>() / values.len().max(1) as f64
                     ),
-                    format!(
-                        "{:.6}ms",
-                        values.percentile(0.99).unwrap_or(0.)
-                    ),
-                    format!(
-                        "{:.6}ms",
-                        values.iter().reduce(f64::max).unwrap_or(0.)
-                    ),
+                    format!("{:.6}ms", values.percentile(0.99).unwrap_or(0.)),
+                    format!("{:.6}ms", values.iter().reduce(f64::max).unwrap_or(0.)),
                     self.correlator
                         .syscall_callers
                         .get(id)

@@ -100,12 +100,14 @@ Replay does not sample the host.
 
 Missing or denied measurements are not healthy zeroes. Captured percentiles use
 bounded samples, and device mean latency is not request p99. Tracing support
-varies with the kernel, permissions and security policy; privileged ARM64 probe
-attachment has not yet been validated.
+varies with the kernel, permissions and security policy. CI samples CPU stacks on
+native x86-64 and ARM64; privileged scheduler, IRQ, block and syscall probes have
+not yet been validated on ARM64.
 
-The project is under active development. Large profile comparisons still have
-performance limitations. See the [performance review](docs/PERFORMANCE_REVIEW.md),
-[known gaps](docs/GAPS.md) and [validation scope](docs/VALIDATION.md).
+The project is under active development. See the
+[performance review](docs/PERFORMANCE_REVIEW.md), [known gaps](docs/GAPS.md) and
+[validation scope](docs/VALIDATION.md). Report vulnerabilities through
+[SECURITY.md](SECURITY.md).
 
 ## Docs
 
