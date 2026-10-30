@@ -3415,7 +3415,8 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
     let title = if zoom.is_empty() {
         subject.clone()
     } else {
-        format!("{subject} · {}", zoom.join(" › "))
+        let path: Vec<_> = zoom.iter().map(|id| profile.label(id)).collect();
+        format!("{subject} · {}", path.join(" › "))
     };
     let area = p(f, bands[1], a, 1, &title, &subtitle);
     let mut cells = crate::flame::layout(root, area.width, area.height, &a.flame_cursor);
@@ -3463,7 +3464,11 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
             }
             fields.push((
                 "stacks".into(),
-                format!("{} · {share:.1}% of {}", node.samples, root.name),
+                format!(
+                    "{} · {share:.1}% of {}",
+                    node.samples,
+                    profile.label(&root.name)
+                ),
             ));
             fields.push((
                 "in this frame".into(),

@@ -96,6 +96,41 @@ fn zooming_narrows_to_the_frame_under_the_cursor_and_escape_unwinds() {
 }
 
 #[test]
+fn a_zoomed_view_names_frames_rather_than_their_identities() {
+    let mut snapshot = model::demo();
+    for (identity, display) in [
+        ("envoy_main", "envoy::main"),
+        ("worker_loop", "envoy::worker_loop"),
+    ] {
+        snapshot.telemetry.profile.frames.insert(
+            identity.into(),
+            kernwatch::flame::FrameInfo {
+                raw: identity.into(),
+                display: display.into(),
+                image: "/usr/bin/envoy".into(),
+                address: 0,
+                kernel: false,
+            },
+        );
+    }
+    let mut a = App::new(snapshot);
+    a.switch(FLAME);
+    key(&mut a, KeyCode::Down);
+    key(&mut a, KeyCode::Down);
+    key(&mut a, KeyCode::Enter);
+    key(&mut a, KeyCode::Down);
+    let screen = render(&a, 160, 52);
+    assert!(
+        screen.contains("envoy::main \u{203a} envoy::worker_loop"),
+        "the title shows readable names"
+    );
+    assert!(
+        screen.contains("% of envoy::worker_loop"),
+        "the share names the zoomed frame"
+    );
+}
+
+#[test]
 fn the_cursor_reads_the_picture_siblings_sideways_and_callees_downward() {
     let mut a = App::new(model::demo());
     a.switch(FLAME);
