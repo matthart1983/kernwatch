@@ -215,9 +215,9 @@ impl Collector {
                     rows.push(vec![
                         id.to_string(),
                         info.name_as_str().unwrap_or("?").into(),
-                        info.program_type()
-                            .map(|kind| format!("{kind:?}"))
-                            .unwrap_or("unknown".into()),
+                        format!("{:?}", info.program_type())
+                            .trim_start_matches("BPF_PROG_TYPE_")
+                            .to_owned(),
                         rate,
                         mean,
                         cpu,

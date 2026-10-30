@@ -8,7 +8,11 @@ sets out the implementation sequence.
 Reviewed 2026-09-12 against release commit
 `5d44c0b864551a59c6e20c538499c7b8092ab0b9`. The subsequent demo commit changes
 documentation, recording tools and a workload example, not application code.
-This review records findings; the optimizations below have not been implemented.
+
+**Status, 2026-09-19: both P1 findings below have been corrected on
+`codex/reduce-observer-cpu` and re-measured.** The findings are kept as written
+so the before/after is legible; see [Re-measured results](#re-measured-results-2026-09-19)
+at the end for what the same harnesses report now.
 
 Ordinary monitoring improved over v0.3.0 on the measured host. Small profiles
 are responsive and the native sampler's controlled acceptance workload has low
@@ -191,3 +195,95 @@ Run the host harness outside a restricted PID namespace and avoid running
 other benchmarks concurrently. It does not enable probes or change host
 configuration. Its JSON contains aggregate timings, memory and kernwatch thread
 CPU, not host task names or recordings. Keep raw host evidence local.
+
+## Re-measured results, 2026-09-19
+
+Same harnesses, same 24-logical-CPU host (Linux 7.1.13-200.fc44.x86_64), run
+against the working tree on `codex/reduce-observer-cpu`. The host showed 554
+visible processes, fewer than the 602 of the original comparison and well below
+the ~2,800 threads of the instrumented long run, so absolute values are not
+directly comparable with the tables above. The shape of the curves is.
+
+### P1 comparison redraws: corrected
+
+`./target/release/examples/performance_review {wide,deep} 8192`:
+
+| Shape | Initial comparison build | Cached redraw, median | Was, per draw |
+| --- | ---: | ---: | ---: |
+| Wide 8,192 | 5.24 ms | 0.197 ms | 154.36 ms |
+| Deep 8,192 | 33.38 ms | 0.315 ms | 416.96 ms |
+
+The prepared comparison is now built once per profile/baseline revision and
+reused, so scrolling and filtering no longer rebuild it. A finished capture no
+longer occupies a core redrawing unchanged data.
+
+### P1 timeline budget omits symbol metadata: corrected
+
+The frame estimate now differs with and without the symbol map, where it was
+previously byte-identical:
+
+| Shape | Estimate with symbols | Estimate without | Symbol JSON |
+| --- | ---: | ---: | ---: |
+| Wide 8,192 | 4,008,376 B | 649,255 B | 2,080,996 B |
+| Deep 8,192 | 38,793,528 B | 5,153,959 B | 20,838,884 B |
+
+### Ordinary monitoring no longer grows
+
+`python3 scripts/monitor_bench.py ./target/release/kernwatch --warmup 15
+--seconds 660`, against the instrumented long-run table in
+[`CPU_REDUCTION_PLAN.md`](CPU_REDUCTION_PLAN.md):
+
+| Time from startup | CPU then | CPU now | RSS then | RSS now |
+| --- | ---: | ---: | ---: | ---: |
+| 75 s | 21.67% | 12.49% | 176.1 MiB | 77.1 MiB |
+| 195 s | 26.09% | 10.96% | 270.1 MiB | 85.6 MiB |
+| 375 s | 30.11% | 11.71% | 405.7 MiB | 98.9 MiB |
+| 555 s | 30.92% | 12.05% | 543.7 MiB | 111.4 MiB |
+| 660 s | 34.57% | 12.10% | 575.2 MiB | 117.0 MiB |
+
+Whole-run CPU averaged 11.57% of one logical core, with reaped helper CPU of
+0.43% giving an observer total of 11.99%. CPU no longer climbs with retained
+history, which was the defining symptom. RSS was still rising slowly at the end
+of this window (115.9 MiB at 615 s to 117.0 MiB at 660 s), so this run does not
+establish the plateau.
+
+A 31-minute run (`--warmup 15 --seconds 1860`, 572 visible processes) does. Live
+series reach their 600-sample capacity at 600 s; RSS after that point:
+
+| Time from startup | RSS |
+| --- | ---: |
+| 600 s | 127.6 MiB |
+| 900 s | 127.7 MiB |
+| 1200 s | 129.4 MiB |
+| 1500 s | 128.2 MiB |
+| 1860 s | 129.3 MiB |
+
+That is 1.7 MiB of drift across the 21 minutes following capacity, with an
+8.0 MiB band over the last five minutes that reflects allocator churn rather
+than a trend. Memory now settles where it previously did not.
+
+CPU from that run is not quotable: builds and tests ran on the same host during
+it, against this harness's own guidance. Its 7.45% average also disagrees with
+the 11.57% of the shorter run on the same tree, so the level needs a quiet host
+and a matched pair before it is stated as a number.
+
+### Capture overhead
+
+`python3 scripts/profile_overhead.py`, three repetitions per frequency with the
+order alternated, capture scoped to a two-thread busy workload:
+
+| Hz | Median throughput ratio | Ratios |
+| --- | ---: | --- |
+| 49 | 1.0099 | 0.9993, 1.0107, 1.0099 |
+| 99 | 0.9982 | 0.9982, 0.9991, 0.9888 |
+
+No stack-walk failures in any capture; sample counts scaled with frequency
+(~766 at 49 Hz, ~1544 at 99 Hz) and a system-wide capture retained the workload.
+Monitor CPU during capture (5.8–7.8% of one core) was indistinguishable from
+monitor CPU while idle (5.8–7.2%).
+
+Read this as no regression detected at this sensitivity, not as a measured 2%
+bound. The 49 Hz median sits above 1.0, which sampling cannot cause, and the
+spread at each frequency is about one percentage point, the same size as the
+effect being tested. Three repetitions support a median, not a confidence
+interval.

@@ -4,7 +4,7 @@ use crate::{app::App, model::TABS};
 use ratatui::{prelude::*, widgets::*};
 use widgets::*;
 pub fn draw(f: &mut Frame, a: &App) {
-    let area = f.size();
+    let area = f.area();
     f.render_widget(Block::default().style(Style::default().bg(BG).fg(FG)), area);
     if area.width < 80 || area.height < 24 {
         line(

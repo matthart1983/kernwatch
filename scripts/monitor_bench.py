@@ -18,13 +18,54 @@ import termios
 import time
 
 
+def stat(pid):
+    return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+
+
+def child_cpu(pid):
+    """CPU of currently unreaped descendants, including their reaped children."""
+    children = set()
+    try:
+        for task in Path(f'/proc/{pid}/task').iterdir():
+            try:
+                children.update(int(p) for p in (task / 'children').read_text().split())
+            except FileNotFoundError:
+                pass
+    except FileNotFoundError:
+        return 0., 0
+    total = 0.
+    count = 0
+    for child in children:
+        try:
+            fields = stat(child)
+            total += sum(int(fields[i]) for i in [11, 12, 13, 14]) / os.sysconf('SC_CLK_TCK')
+            nested, descendants = child_cpu(child)
+            total += nested
+            count += 1 + descendants
+        except FileNotFoundError:
+            pass
+    return total, count
+
+
 def sample(pid):
-    fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+    # Retry when reaping moves CPU from a live child into the parent's cutime.
+    # /proc is not transactional; report a race if all three attempts overlap it.
+    for _ in range(3):
+        fields = stat(pid)
+        active_cpu, active_count = child_cpu(pid)
+        after = stat(pid)
+        consistent = fields[13:15] == after[13:15]
+        if consistent:
+            break
     status = dict(line.split(':', 1) for line in Path(f'/proc/{pid}/status').read_text().splitlines())
+    own = (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK')
+    reaped = (int(fields[13]) + int(fields[14])) / os.sysconf('SC_CLK_TCK')
     return {'user_seconds': int(fields[11]) / os.sysconf('SC_CLK_TCK'),
             'system_seconds': int(fields[12]) / os.sysconf('SC_CLK_TCK'),
-            'reaped_child_seconds': (int(fields[13]) + int(fields[14])) / os.sysconf('SC_CLK_TCK'),
-            'cpu_seconds': (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK'),
+            'reaped_child_seconds': reaped, 'active_child_seconds': active_cpu,
+            'observer_cpu_seconds': own + reaped + active_cpu,
+            'active_helpers': active_count, 'children_consistent': consistent,
+            'cpu_seconds': own,
             'rss_kib': int(status['VmRSS'].split()[0]), 'threads': int(status['Threads'])}
 
 
@@ -86,7 +127,9 @@ def run(binary, seconds, warmup, mode):
                     'user_cpu_pct': 100 * (after['user_seconds'] - before['user_seconds']) / elapsed,
                     'system_cpu_pct': 100 * (after['system_seconds'] - before['system_seconds']) / elapsed,
                     'reaped_helper_cpu_pct': 100 * (after['reaped_child_seconds'] - before['reaped_child_seconds']) / elapsed,
-                    'observer_cpu_pct': 100 * (after['cpu_seconds'] + after['reaped_child_seconds'] - before['cpu_seconds'] - before['reaped_child_seconds']) / elapsed,
+                    'observer_cpu_pct': 100 * (after['observer_cpu_seconds'] - before['observer_cpu_seconds']) / elapsed,
+                    'helper_accounting_retries_exhausted': sum(not s['children_consistent'] for s in samples),
+                    'peak_active_helpers': max(s['active_helpers'] for s in samples),
                     'rss_start_kib': before['rss_kib'], 'rss_end_kib': after['rss_kib'],
                     'rss_peak_kib': max(s['rss_kib'] for s in samples),
                     'terminal_bytes_per_second': (traffic - traffic_before) / elapsed,

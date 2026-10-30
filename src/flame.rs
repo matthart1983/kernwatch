@@ -452,8 +452,48 @@ pub struct PreparedComparison {
     pub comparison: Comparison,
     pub union: Profile,
     pub order: Vec<usize>,
+    filter_order: std::cell::RefCell<Option<(String, Vec<usize>)>>,
 }
 impl PreparedComparison {
+    /// Only a changed query scans all paths. Scrolling and redraw reuse the
+    /// matching indices; labels are formatted for visible rows only.
+    pub fn matching(&self, needle: &str) -> std::cell::Ref<'_, Vec<usize>> {
+        let valid = self
+            .filter_order
+            .borrow()
+            .as_ref()
+            .is_some_and(|(old, _)| old == needle);
+        if !valid {
+            let indices = if needle.is_empty() {
+                self.order.clone()
+            } else {
+                self.order
+                    .iter()
+                    .copied()
+                    .filter(|&i| {
+                        self.comparison.changes[i]
+                            .path
+                            .iter()
+                            .map(|id| {
+                                self.current
+                                    .frames
+                                    .get(id.as_str())
+                                    .or_else(|| self.baseline.frames.get(id.as_str()))
+                                    .map_or(id.as_str(), |f| f.display.as_str())
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" › ")
+                            .to_lowercase()
+                            .contains(needle)
+                    })
+                    .collect()
+            };
+            *self.filter_order.borrow_mut() = Some((needle.to_owned(), indices));
+        }
+        std::cell::Ref::map(self.filter_order.borrow(), |cache| {
+            &cache.as_ref().unwrap().1
+        })
+    }
     pub fn new(
         current: &Profile,
         baseline: &Profile,
@@ -475,6 +515,7 @@ impl PreparedComparison {
             comparison,
             union: current.comparison_union(baseline),
             order,
+            filter_order: Default::default(),
         })
     }
 }

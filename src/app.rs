@@ -2213,6 +2213,16 @@ impl App {
         let arg = parts.next().unwrap_or("").trim();
         match cmd {
             "profile-baseline" => {
+                if arg == "off" {
+                    // A retained baseline owns a whole profile tree and its
+                    // symbol table for the life of the process. Releasing it
+                    // also drops the prepared comparison built against it.
+                    self.flame_baseline = None;
+                    self.flame_compare = None;
+                    *self.comparison_cache.borrow_mut() = None;
+                    self.status = "Profile baseline released".into();
+                    return;
+                }
                 let result: Result<crate::flame::Profile, String> = if arg.is_empty() {
                     Ok(self.snapshot.telemetry.profile.clone())
                 } else {
@@ -2237,6 +2247,10 @@ impl App {
             "profile-diff" => {
                 if arg == "off" {
                     self.flame_compare = None;
+                    // The prepared comparison is only meaningful while a
+                    // comparison is displayed; it holds the current profile,
+                    // the baseline and a merged union tree.
+                    *self.comparison_cache.borrow_mut() = None;
                     return;
                 }
                 let mode = match arg {

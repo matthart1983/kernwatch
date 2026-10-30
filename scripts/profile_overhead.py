@@ -46,7 +46,7 @@ with tempfile.TemporaryDirectory(prefix='kernwatch-full-profile-') as work:
                 drain(6)
                 elapsed = time.monotonic()-start; rate = (count()-initial)/elapsed
                 after = sample(monitor.pid)
-                cpu = 100*(after['cpu_seconds']+after['reaped_child_seconds']-before['cpu_seconds']-before['reaped_child_seconds'])/elapsed
+                cpu = 100*(after['observer_cpu_seconds']-before['observer_cpu_seconds'])/elapsed
                 return rate, cpu
             results = []
             for repetition in range(3):

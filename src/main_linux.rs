@@ -151,7 +151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let buffer = term.backend().buffer();
         for y in 0..h {
             let line = (0..w)
-                .map(|x| buffer.get(x, y).symbol())
+                .map(|x| buffer[(x, y)].symbol())
                 .collect::<String>();
             println!("{}", line.trim_end());
         }
@@ -416,6 +416,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     dirty = true;
                 }
             }
+            // Recording/source failures can change status while the data view is frozen.
+            dirty |= before_tick.1 != app.status;
             if dirty {
             execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
             let draw_cost = kernwatch::cpu_cost::scope("main.draw");

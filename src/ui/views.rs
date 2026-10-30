@@ -2027,7 +2027,7 @@ fn cgroups(f: &mut Frame, r: Rect, a: &App) {
                     - ((quota / max).clamp(0., 1.) * (plots[1].height - 1) as f64) as u16;
                 for x in plots[1].x..plots[1].right() {
                     if x % 2 == 0 {
-                        f.buffer_mut().get_mut(x, y).set_char('─').set_fg(GOLD);
+                        f.buffer_mut()[(x, y)].set_char('─').set_fg(GOLD);
                     }
                 }
                 line(
@@ -3215,9 +3215,9 @@ mod timeline_tests {
             .collect();
         for width in [80, 160] {
             let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(width, 8)).unwrap();
-            terminal.draw(|f| timeline(f, f.size(), &a, 8)).unwrap();
+            terminal.draw(|f| timeline(f, f.area(), &a, 8)).unwrap();
             let columns: Vec<_> = (0..width)
-                .filter(|x| terminal.backend().buffer().get(*x, 6).symbol() == "▲")
+                .filter(|x| terminal.backend().buffer()[(*x, 6)].symbol() == "▲")
                 .collect();
             assert_eq!(columns, vec![width - 14, width - 5, width - 2]);
         }
@@ -3237,10 +3237,10 @@ mod timeline_tests {
             a.snapshot.telemetry.record(key, Some(2.), "", 100.);
         }
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 8)).unwrap();
-        terminal.draw(|f| timeline(f, f.size(), &a, 8)).unwrap();
+        terminal.draw(|f| timeline(f, f.area(), &a, 8)).unwrap();
         for y in 1..=5 {
             let line = (0..100)
-                .map(|x| terminal.backend().buffer().get(x, y).symbol())
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
                 .collect::<String>();
             assert!(line.contains("2.0"), "missing value: {line}");
             assert!(
@@ -3284,7 +3284,7 @@ mod field_tests {
     use ratatui::{backend::TestBackend, Terminal};
     fn row(buffer: &ratatui::buffer::Buffer, y: u16, width: u16) -> String {
         (0..width)
-            .map(|x| buffer.get(x, y).symbol())
+            .map(|x| buffer[(x, y)].symbol())
             .collect::<String>()
     }
     #[test]
@@ -3998,16 +3998,11 @@ fn flame_difference(
     let skip = (a.scroll as usize).saturating_sub(header_len);
     let header_skip = (a.scroll as usize).min(header_len);
     lines.drain(..header_skip);
-    let mut matched = 0;
-    for index in &prepared.order {
+    let matching = prepared.matching(&needle);
+    for index in matching.iter().skip(skip) {
         let change = &comparison.changes[*index];
         if lines.len() >= bands[1].height as usize {
             break;
-        }
-        // With no filter, skip off-screen paths without constructing labels.
-        if needle.is_empty() && matched < skip {
-            matched += 1;
-            continue;
         }
         let path = change
             .path
@@ -4021,13 +4016,6 @@ fn flame_difference(
             })
             .collect::<Vec<_>>()
             .join(" › ");
-        if !path.to_lowercase().contains(&needle) {
-            continue;
-        }
-        if matched < skip {
-            matched += 1;
-            continue;
-        }
         lines.push(Line::styled(
             format!(
                 "{:11} {:10} {:+11.2}  {}",

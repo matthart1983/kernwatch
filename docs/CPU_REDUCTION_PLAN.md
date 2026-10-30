@@ -1,9 +1,33 @@
 # Reduce kernwatch's own CPU consumption
 
-Status: implementation and verification in progress, 2026-09-12. Shared history,
-identity indexes, demand-driven enrichment, task fast-path changes, dirty rendering
-and cached comparisons are implemented; combined acceptance is still running. Baseline application commit:
-`50c116338f1063f07de63b2d6ded4f10e70153d7` (same runtime code as v0.4.0).
+Status: stages 0-5 implemented; stage 6 acceptance partly measured, 2026-09-19.
+Shared history, identity indexes, demand-driven enrichment, task fast-path
+changes, dirty rendering and cached comparisons are implemented. Baseline
+application commit: `50c116338f1063f07de63b2d6ded4f10e70153d7` (same runtime
+code as v0.4.0).
+
+Measured against the stage 6 budgets on the 24-CPU reference host, working tree
+on `codex/reduce-observer-cpu`. Full numbers in
+[`PERFORMANCE_REVIEW.md`](PERFORMANCE_REVIEW.md#re-measured-results-2026-09-19).
+
+| Budget | Result |
+| --- | --- |
+| Dense, no probes: at least 50% less observer CPU, aim ≤10% of one core | Partly met. 11.57% of one core against ~29.5% for the instrumented baseline, about 61% less, but above the 10% aim. Measured on a 554-process host, not the specified ~3,000 threads, and against the recorded baseline rather than a matched old/new/new/old pair. |
+| Stable input after history capacity: accounted bytes bounded, no sustained RSS growth over the following 20 minutes | Met. A 31-minute run reached history capacity at 600 s and then moved 127.6 MiB to 129.3 MiB over the following 21 minutes, a 1.7 MiB drift with no trend. The baseline this plan was written against reached 575 MiB and was still climbing. |
+| New one-second telemetry: p95 publication lag below 200 ms, no silent gaps | Not measured; no harness yet. |
+| Keyboard/resize: p95 input-to-draw below 100 ms | Not measured; no harness yet. |
+| 8,192-path comparison: initial build below 50 ms, cached redraw below 5 ms | Met. Wide 5.24 ms build / 0.197 ms redraw; deep 33.38 ms / 0.315 ms. |
+| Active CPU profile: workload throughput change ≤2% median, uncertainty reported | Met at this sensitivity. Medians 1.0099 at 49 Hz and 0.9982 at 99 Hz. Spread is the same size as the effect, so read it as no regression detected rather than a measured bound. |
+
+Both growth symptoms that motivated this plan are gone. CPU no longer climbs
+with retained history, and RSS plateaus once the history window fills instead of
+rising for as long as the process runs.
+
+Absolute CPU figures are not yet reliable on this host. Two runs of the same
+tree averaged 11.57% and 7.45% of one logical core, and the second overlapped
+builds and tests on the same machine, which the harness warns against. Treat the
+flatness of the curve as the result and the level as unestablished until the
+matched old/new/new/old comparison runs on an otherwise quiet host.
 
 ## Conclusion
 

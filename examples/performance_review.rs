@@ -83,6 +83,10 @@ fn main() {
     let comparison = measure(|| {
         terminal.draw(|f| ui::draw(f, &app)).unwrap();
     });
+    app.filter = "request::dispatch::frame_08191".into();
+    let filtered = measure(|| {
+        terminal.draw(|f| ui::draw(f, &app)).unwrap();
+    });
     let union = measure(|| {
         black_box(current.comparison_union(&baseline));
     });
@@ -109,7 +113,7 @@ fn main() {
     println!(
         "{}",
         json!({"shape":shape,"stacks":count,"symbols":current.frames.len(),
-        "build_ms":build_ms,"render":single,"render_comparison":comparison,
+        "build_ms":build_ms,"render":single,"render_comparison":comparison,"render_filtered_comparison":filtered,
         "initial_comparison_ms":initial_comparison_ms,"comparison_union":union,"clone_sort_publish":clone_sort,
         "frame_estimate_with_symbols":estimated_with_symbols,
         "frame_estimate_without_symbols":estimated_without_symbols,

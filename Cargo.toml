@@ -7,13 +7,16 @@ repository = "https://github.com/matthart1983/kernwatch"
 readme = "README.md"
 rust-version = "1.98"
 license = "MIT"
+categories = ["command-line-utilities", "os::linux-apis"]
+keywords = ["linux", "ebpf", "observability", "tui", "kernel"]
+exclude = ["screenshots/", "docs/reference/"]
 
 [dependencies]
-ratatui = "0.27"
-crossterm = "0.27"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache", "underline-color"] }
+crossterm = "0.29"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 libc = "0.2"
-aya = "0.13.1"
+aya = "0.14"
 rustc-demangle = "0.1"
-cpp_demangle = { version = "0.4.5", path = "vendor/cpp_demangle" }
+cpp_demangle = "0.5.1"
