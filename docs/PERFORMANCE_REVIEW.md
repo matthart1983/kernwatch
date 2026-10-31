@@ -287,3 +287,35 @@ bound. The 49 Hz median sits above 1.0, which sampling cannot cause, and the
 spread at each frequency is about one percentage point, the same size as the
 effect being tested. Three repetitions support a median, not a confidence
 interval.
+
+## Matched comparison, 2026-10-31
+
+`python3 scripts/monitor_bench.py old new new old --warmup 15 --seconds 660`, with
+v0.4.1 built from its tag and v0.5.0 from `e91e68c`, both with Rust 1.99.1. Dense
+view, no probes, 24-logical-CPU host on Linux 7.1.13-200.fc44.x86_64, 570 visible
+processes at the start. This replaces the unmatched comparison above.
+
+| Run | Build | Observer CPU, % of one core | Reaped helpers | RSS at 675 s | Mean 1-minute load |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | v0.4.1 | 35.35% | 8.39% | 546.7 MiB | 4.0 |
+| 2 | v0.5.0 | 14.71% | 0.54% | 149.5 MiB | 6.7 |
+| 3 | v0.5.0 | 10.28% | 0.30% | 152.2 MiB | 3.8 |
+| 4 | v0.4.1 | 54.00% | 12.23% | 608.1 MiB | 14.0 |
+
+Mean observer CPU fell about 72% and mean RSS about 74%. The ranges don't overlap,
+but the host wasn't quiet. Other builds ran throughout, and the two v0.4.1 runs
+differ by 19 percentage points. Runs 1 and 3 saw similar load and differ by 71%.
+
+Observer CPU and RSS across each quarter of the run:
+
+| Run | Build | Q1 | Q2 | Q3 | Q4 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | v0.4.1 | 29.2%, 245 MiB | 34.2%, 366 MiB | 39.6%, 489 MiB | 38.5%, 547 MiB |
+| 2 | v0.5.0 | 8.8%, 99 MiB | 15.6%, 120 MiB | 19.7%, 136 MiB | 14.8%, 149 MiB |
+| 3 | v0.5.0 | 8.2%, 101 MiB | 9.7%, 118 MiB | 10.7%, 137 MiB | 12.6%, 152 MiB |
+| 4 | v0.4.1 | 42.8%, 269 MiB | 71.9%, 401 MiB | 60.9%, 537 MiB | 40.6%, 608 MiB |
+
+This corrects "CPU no longer climbs" above. In run 3, the quietest v0.5.0 run, CPU
+rose by about half over the window. RSS grew about 50 MiB from Q1 to Q4, against
+about 300 MiB in run 1. These runs end soon after the 600-sample history fills, so
+they don't show a plateau; the 31-minute run above does, on an earlier tree.

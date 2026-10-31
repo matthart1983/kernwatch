@@ -12,21 +12,22 @@ on `codex/reduce-observer-cpu`. Full numbers in
 
 | Budget | Result |
 | --- | --- |
-| Dense, no probes: at least 50% less observer CPU, aim ≤10% of one core | Partly met. 11.57% of one core against ~29.5% for the instrumented baseline, about 61% less, but above the 10% aim. Measured on a 554-process host, not the specified ~3,000 threads, and against the recorded baseline rather than a matched old/new/new/old pair. |
+| Dense, no probes: at least 50% less observer CPU, aim ≤10% of one core | Partly met. Matched runs on 2026-10-31 measured 14.71% and 10.28% of one core against 35.35% and 54.00% for v0.4.1, about 72% less, but above the 10% aim. Measured with about 570 visible processes, not the specified ~3,000 threads, on a host that wasn't quiet. |
 | Stable input after history capacity: accounted bytes bounded, no sustained RSS growth over the following 20 minutes | Met. A 31-minute run reached history capacity at 600 s and then moved 127.6 MiB to 129.3 MiB over the following 21 minutes, a 1.7 MiB drift with no trend. The baseline this plan was written against reached 575 MiB as its history filled, on a host with more threads. |
 | New one-second telemetry: p95 publication lag below 200 ms, no silent gaps | Not measured; no harness yet. |
 | Keyboard/resize: p95 input-to-draw below 100 ms | Not measured; no harness yet. |
 | 8,192-path comparison: initial build below 50 ms, cached redraw below 5 ms | Met. Wide 5.24 ms build / 0.197 ms redraw; deep 33.38 ms / 0.315 ms. |
 | Active CPU profile: workload throughput change ≤2% median, uncertainty reported | Met at this sensitivity. Medians 1.0099 at 49 Hz and 0.9982 at 99 Hz. Spread is the same size as the effect, so read it as no regression detected rather than a measured bound. |
 
-CPU no longer climbs with retained history. RSS still rises until the history
-window fills, then plateaus at a much lower level on the hosts measured.
+RSS still rises until the history window fills, then plateaus at a much lower
+level on the hosts measured. CPU climbs far less than it did, but it isn't flat:
+the quietest matched run rose from 8.2% to 12.6% of one core over 660 seconds,
+against 29.2% to 38.5% for v0.4.1.
 
-Absolute CPU figures are not yet reliable on this host. Two runs of the same
-tree averaged 11.57% and 7.45% of one logical core, and the second overlapped
-builds and tests on the same machine, which the harness warns against. Treat the
-flatness of the curve as the result and the level as unestablished until the
-matched old/new/new/old comparison runs on an otherwise quiet host.
+Absolute CPU figures remain noisy on this host. Runs of this tree have averaged
+7.45%, 10.28%, 11.57% and 14.71% of one logical core, and the matched runs shared
+the host with other builds. Treat the size of the reduction as the result and the
+exact level as unestablished until the comparison repeats on a quiet host.
 
 ## Conclusion
 

@@ -1,6 +1,13 @@
 ## kernwatch v0.5.0
 
-Stops kernwatch's own cost from growing the longer it runs. Before this release, CPU and memory climbed with retained history, so a monitor left open kept getting more expensive.
+Cuts kernwatch's own CPU and memory use, and most of the growth that came from leaving it open.
+
+| Dense view, no probes, two runs each | v0.4.1 | v0.5.0 |
+| --- | ---: | ---: |
+| CPU including helpers, % of one core | 35.35, 54.00 | 14.71, 10.28 |
+| RSS at 675 s | 546.7, 608.1 MiB | 149.5, 152.2 MiB |
+
+Measured old/new/new/old on a 24-CPU host with about 570 visible processes, both built with the same compiler. The host wasn't quiet: other builds were running, and the second v0.4.1 run saw the most load. Read these as direction and rough size, not exact levels. RSS still rises until the 600-sample history fills, and CPU still climbs a little as it does: the quietest v0.5.0 run went from 8.2% to 12.6% of one core over 660 seconds.
 
 - Share history between snapshots instead of copying it, and count profile symbols against the timeline budget. On the reference host, RSS moved 1.7 MiB over the 21 minutes after the 600-sample history filled.
 - Run metadata helpers on demand instead of on a timer. `scripts/monitor_bench.py` now counts live helper processes as observer CPU.
