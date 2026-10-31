@@ -70,7 +70,9 @@ impl Collector {
                 }
                 Ok(info) => {
                     let id = info.id();
-                    let identity = format!("{:016x}:{:?}", info.tag(), info.loaded_at());
+                    // Not loaded_at(): aya derives it from the clock on every read, so
+                    // it differs between samples of one program and looks like a reload.
+                    let identity = format!("{:016x}", info.tag());
                     if self.identities.get(&id) != Some(&identity) {
                         self.previous.remove(&id);
                         self.metadata.remove(&id);
