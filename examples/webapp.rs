@@ -1,9 +1,12 @@
-//! Bounded workload for the real-VM flame graph preview. Build with frame pointers.
+//! Bounded workload for the real-VM previews. Build with frame pointers.
 //! Three threads give the graph depth and width to explore: requests with recursive
 //! rendering, a compactor that spends time in the kernel and a light metrics thread.
 //! Exporting the first profile switches requests from cache-heavy to parse-heavy.
+//! The tour also runs `webapp batch`, a pulsing neighbour, and gives this process an
+//! expendable /dev/vda, so its other views have something real to show.
 use std::hint::black_box;
 use std::io::{Seek, Write};
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::time::{Duration, Instant};
 
 const RUNTIME: Duration = Duration::from_secs(180);
@@ -261,17 +264,100 @@ fn report_metrics() {
     black_box(value);
 }
 
+#[inline(never)]
+fn write_journal_block(disk: &std::fs::File, block: &[u8], offset: u64) {
+    disk.write_all_at(block, offset).unwrap();
+}
+
+#[inline(never)]
+fn read_checkpoint(disk: &std::fs::File, block: &mut [u8], offset: u64) {
+    disk.read_exact_at(block, offset).unwrap();
+}
+
+#[inline(never)]
+fn run_journal(disk: std::fs::File) {
+    const BLOCK: usize = 1 << 20;
+    const SPAN: u64 = 512 << 20;
+    let deadline = Instant::now() + RUNTIME;
+    // O_DIRECT needs an aligned buffer.
+    let mut raw = vec![7; BLOCK + 4096];
+    let start = raw.as_ptr().align_offset(4096);
+    let block = &mut raw[start..start + BLOCK];
+    let mut offset = 0;
+    while Instant::now() < deadline {
+        write_journal_block(&disk, block, offset);
+        read_checkpoint(&disk, block, offset);
+        disk.sync_data().unwrap();
+        offset = (offset + BLOCK as u64) % SPAN;
+        std::thread::sleep(Duration::from_millis(40));
+    }
+}
+
+#[inline(never)]
+fn stem_word(value: u64) -> u64 {
+    burn(value, 8)
+}
+
+#[inline(never)]
+fn tokenize(value: u64) -> u64 {
+    let value = burn(value, 2);
+    let value = stem_word(value);
+    black_box(value)
+}
+
+/// Pulse rather than pin, so CPU history has a shape instead of a ceiling.
+#[inline(never)]
+fn index_documents() {
+    let deadline = Instant::now() + RUNTIME;
+    let mut value = 1;
+    while Instant::now() < deadline {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(9) {
+            value = tokenize(value);
+        }
+        std::thread::sleep(Duration::from_secs(5));
+    }
+    black_box(value);
+}
+
+#[inline(never)]
+fn build_segment() {
+    let deadline = Instant::now() + RUNTIME;
+    while Instant::now() < deadline {
+        let segment = vec![1u8; 192 << 20];
+        std::thread::sleep(Duration::from_secs(10));
+        black_box(&segment);
+        drop(segment);
+        std::thread::sleep(Duration::from_secs(6));
+    }
+}
+
+fn spawn(name: &str, work: impl FnOnce() + Send + 'static) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(work)
+        .unwrap()
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("batch") {
+        unsafe { libc::prctl(libc::PR_SET_NAME, c"batch".as_ptr()) };
+        spawn("indexer", index_documents);
+        spawn("segments", build_segment);
+        index_documents();
+        return;
+    }
     // A stable, short name makes the process easy to find in the picker.
     unsafe { libc::prctl(libc::PR_SET_NAME, c"webapp".as_ptr()) };
-    for (name, work) in [
-        ("compactor", compact_segments as fn()),
-        ("metrics", report_metrics as fn()),
-    ] {
-        std::thread::Builder::new()
-            .name(name.into())
-            .spawn(work)
-            .unwrap();
+    spawn("compactor", compact_segments);
+    spawn("metrics", report_metrics);
+    let disk = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_DIRECT)
+        .open("/dev/vda");
+    if let Ok(disk) = disk {
+        spawn("journal", move || run_journal(disk));
     }
     serve_requests();
 }

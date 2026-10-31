@@ -1,10 +1,10 @@
 # Review the kernwatch demo
 
-kernwatch has four previews. The README leads with the **flame graph preview**,
-recorded in a disposable Linux VM. The **profiling preview** records the same
-capture and comparison flow with a simpler workload, and the **live-host overview**
-records a real host. The **guided demo** below uses a synthetic incident and runs
-without host probes.
+kernwatch has five previews. The README leads with the **general tour**, recorded
+in a disposable Linux VM. The **flame graph preview** records capture and comparison
+in the same kind of VM, and the **profiling preview** records that flow with a simpler
+workload. The **live-host overview** records a real host. The **guided demo** below
+uses a synthetic incident and runs without host probes.
 
 ## Record the profiling preview
 
@@ -59,6 +59,24 @@ parse-heavy. The recording cuts VM boot and the start of the second capture.
 The script runs the profiling preview's checks and also requires frames from the
 recursive path, the compactor, and the kernel write path. The output is
 `screenshots/demo/kernwatch-flame.gif`.
+
+## Record the general tour
+
+```sh
+python3 scripts/profile_demo.py --tour
+```
+
+This boots the same kind of VM with four CPUs and KVM where available, and gives
+each view something real to read. `webapp` does direct I/O on an expendable 1 GiB
+disk image in the scratch directory, and `webapp batch` adds a pulsing neighbour.
+The two run in their own cgroups, and `webapp.service` has a CPU quota low enough
+to throttle it. Four kernel modules from the host's module tree load in the guest.
+
+The sequence collects history for about 80 seconds off-camera, starts every probe
+family, visits each view except Overview, then captures CPU stacks. The services,
+quota and workload are staged, so a finding such as `throttled` is a true reading
+of a staged machine, not a real incident. The script checks the exported capture.
+The output is `screenshots/demo/kernwatch-tour.gif`.
 
 ## Record the live preview
 
