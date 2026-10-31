@@ -41,12 +41,124 @@ pub struct Sample {
     pub at_ms: u64,
     pub value: Option<f64>,
 }
+/// Immutable 32-sample chunks: cloning a history shares its payload. Appending
+/// copies at most the unfinished chunk, never the whole retained window.
+#[derive(Clone, Debug, Default)]
+pub struct Samples {
+    chunks: std::collections::VecDeque<std::sync::Arc<Vec<Sample>>>,
+    offset: usize,
+    len: usize,
+}
+impl Samples {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &Sample> {
+        self.chunks
+            .iter()
+            .enumerate()
+            .flat_map(move |(i, c)| c[if i == 0 { self.offset } else { 0 }..].iter())
+    }
+    pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut Sample> {
+        let offset = self.offset;
+        self.chunks.iter_mut().enumerate().flat_map(move |(i, c)| {
+            std::sync::Arc::make_mut(c)[if i == 0 { offset } else { 0 }..].iter_mut()
+        })
+    }
+    pub fn get(&self, index: usize) -> Option<&Sample> {
+        if index >= self.len {
+            return None;
+        }
+        let index = index + self.offset;
+        self.chunks.get(index / 32)?.get(index % 32)
+    }
+    pub fn last(&self) -> Option<&Sample> {
+        self.chunks.back()?.last()
+    }
+    pub fn last_mut(&mut self) -> Option<&mut Sample> {
+        std::sync::Arc::make_mut(self.chunks.back_mut()?).last_mut()
+    }
+    pub fn push(&mut self, sample: Sample) {
+        if self.chunks.back().is_none_or(|c| c.len() == 32) {
+            self.chunks
+                .push_back(std::sync::Arc::new(Vec::with_capacity(32)));
+        }
+        let tail = self.chunks.back_mut().unwrap();
+        if std::sync::Arc::strong_count(tail) > 1 {
+            crate::cpu_cost::counter(
+                "history_cow_sample_bytes",
+                (tail.len() * std::mem::size_of::<Sample>()) as u64,
+            );
+            let mut copy = Vec::with_capacity(32);
+            copy.extend(tail.iter().cloned());
+            *tail = std::sync::Arc::new(copy);
+        }
+        std::sync::Arc::get_mut(tail).unwrap().push(sample);
+        self.len += 1;
+    }
+    pub fn pop_front(&mut self) {
+        if self.len == 0 {
+            return;
+        }
+        self.len -= 1;
+        self.offset += 1;
+        if self.offset == self.chunks.front().unwrap().len() {
+            self.chunks.pop_front();
+            self.offset = 0;
+        }
+    }
+    pub fn retain(&mut self, mut keep: impl FnMut(&Sample) -> bool) {
+        *self = self.iter().filter(|s| keep(s)).cloned().collect();
+    }
+    /// Payload retained by this version (shared chunks counted once per version).
+    pub fn bytes(&self) -> usize {
+        self.chunks
+            .iter()
+            .map(|c| c.capacity() * std::mem::size_of::<Sample>() + 32)
+            .sum::<usize>()
+            + self.chunks.capacity() * std::mem::size_of::<std::sync::Arc<Vec<Sample>>>()
+    }
+}
+impl std::ops::Index<usize> for Samples {
+    type Output = Sample;
+    fn index(&self, index: usize) -> &Sample {
+        self.get(index).expect("sample index")
+    }
+}
+impl FromIterator<Sample> for Samples {
+    fn from_iter<T: IntoIterator<Item = Sample>>(values: T) -> Self {
+        let mut out = Self::default();
+        for value in values {
+            out.push(value);
+        }
+        out
+    }
+}
+impl From<Vec<Sample>> for Samples {
+    fn from(values: Vec<Sample>) -> Self {
+        values.into_iter().collect()
+    }
+}
+impl Serialize for Samples {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.iter())
+    }
+}
+impl<'de> Deserialize<'de> for Samples {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Vec::<Sample>::deserialize(deserializer)?.into())
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Series {
     pub name: String,
     pub unit: String,
     pub max: f64,
-    pub samples: Vec<Sample>,
+    pub samples: Samples,
 }
 impl Series {
     pub fn at(&self, cursor: u64) -> Option<f64> {
@@ -92,12 +204,18 @@ impl Series {
         }
         self.samples.push(Sample { at_ms, value });
         if self.samples.len() > 600 {
-            self.samples.drain(..self.samples.len() - 600);
+            while self.samples.len() > 600 {
+                self.samples.pop_front();
+            }
         }
     }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Task {
+    #[serde(default)]
+    pub status_at_ms: Option<u64>,
+    #[serde(default)]
+    pub status_interval_ms: Option<u64>,
     #[serde(default)]
     pub nice: Option<i32>,
     #[serde(default)]
@@ -272,7 +390,7 @@ impl Telemetry {
             name: key.into(),
             unit: unit.into(),
             max,
-            samples: Vec::new(),
+            samples: Samples::default(),
         });
         s.max = s.max.max(max);
         s.push(self.at_ms, value);

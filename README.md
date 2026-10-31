@@ -12,11 +12,11 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/matthart1983/kernwatch/main/screenshots/demo/kernwatch-profiling.gif" alt="kernwatch CPU profiling: capture stacks, save a baseline and compare workloads" width="900">
+  <img src="https://raw.githubusercontent.com/matthart1983/kernwatch/main/screenshots/demo/kernwatch-flame.gif" alt="kernwatch flame graph: capture stacks, follow the hottest path, zoom, search and compare two captures" width="900">
 </p>
 
 <p align="center">
-  <em>Real CPU samples from a bounded workload in a Linux VM; not a performance benchmark.</em>
+  <em>Real CPU samples from a purpose-built demo workload in a Linux VM; not a performance benchmark.</em>
 </p>
 
 Investigate CPU contention, scheduling, memory pressure, block IO and interrupts.
@@ -100,12 +100,14 @@ Replay does not sample the host.
 
 Missing or denied measurements are not healthy zeroes. Captured percentiles use
 bounded samples, and device mean latency is not request p99. Tracing support
-varies with the kernel, permissions and security policy; privileged ARM64 probe
-attachment has not yet been validated.
+varies with the kernel, permissions and security policy. CI samples CPU stacks on
+native x86-64 and ARM64; privileged scheduler, IRQ, block and syscall probes have
+not yet been validated on ARM64.
 
-The project is under active development. Large profile comparisons still have
-performance limitations. See the [performance review](docs/PERFORMANCE_REVIEW.md),
-[known gaps](docs/GAPS.md) and [validation scope](docs/VALIDATION.md).
+The project is under active development. See the
+[performance review](docs/PERFORMANCE_REVIEW.md), [known gaps](docs/GAPS.md) and
+[validation scope](docs/VALIDATION.md). Report vulnerabilities through
+[SECURITY.md](SECURITY.md).
 
 ## Docs
 

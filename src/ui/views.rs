@@ -3415,7 +3415,8 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
     let title = if zoom.is_empty() {
         subject.clone()
     } else {
-        format!("{subject} · {}", zoom.join(" › "))
+        let path: Vec<_> = zoom.iter().map(|id| profile.label(id)).collect();
+        format!("{subject} · {}", path.join(" › "))
     };
     let area = p(f, bands[1], a, 1, &title, &subtitle);
     let mut cells = crate::flame::layout(root, area.width, area.height, &a.flame_cursor);
@@ -3463,7 +3464,11 @@ fn flame(f: &mut Frame, r: Rect, a: &App) {
             }
             fields.push((
                 "stacks".into(),
-                format!("{} · {share:.1}% of {}", node.samples, root.name),
+                format!(
+                    "{} · {share:.1}% of {}",
+                    node.samples,
+                    profile.label(&root.name)
+                ),
             ));
             fields.push((
                 "in this frame".into(),
@@ -3928,13 +3933,14 @@ fn flame_difference(
         "profile comparison",
         "red grew · green shrank · :profile-diff counts|share|off",
     );
-    let comparison = match current.compare(baseline, mode) {
+    let prepared = match a.prepared_comparison(baseline, mode) {
         Ok(c) => c,
         Err(e) => {
             text(f, area, vec![Line::raw(e)]);
             return;
         }
     };
+    let comparison = &prepared.comparison;
     let unit = if mode == crate::flame::ComparisonMode::Share {
         "percentage points"
     } else {
@@ -3944,10 +3950,10 @@ fn flame_difference(
         area,
         &[Constraint::Percentage(55), Constraint::Percentage(45)],
     );
-    let union = current.comparison_union(baseline);
+    let union = &prepared.union;
     let mut layout = crate::flame::layout(&union.root, bands[0].width, bands[0].height, &[]);
     for cell in &mut layout.cells {
-        let mut node = &union.root;
+        let mut node: &crate::flame::Node = &union.root;
         let mut path = Vec::new();
         for index in &cell.path {
             node = &node.children[*index];
@@ -3956,9 +3962,14 @@ fn flame_difference(
         if cell.folded == 0 {
             let delta = comparison
                 .changes
-                .iter()
-                .find(|c| c.path == path)
-                .map_or(0., |c| c.delta);
+                .binary_search_by(|c| {
+                    c.path
+                        .iter()
+                        .map(|s| s.as_str())
+                        .cmp(path.iter().map(String::as_str))
+                })
+                .ok()
+                .map_or(0., |i| comparison.changes[i].delta);
             cell.delta = Some(delta);
             cell.name = format!("{} {delta:+.1}", union.label(&cell.name));
         }
@@ -3970,13 +3981,6 @@ fn flame_difference(
         usize::MAX,
         &a.filter.to_lowercase(),
     );
-    let mut changes = comparison.changes;
-    changes.sort_by(|x, y| {
-        y.delta
-            .abs()
-            .total_cmp(&x.delta.abs())
-            .then_with(|| x.path.cmp(&y.path))
-    });
     let mut lines = vec![
         Line::raw(format!(
             "{} baseline → {} current · delta in {unit}; widths = union path counts",
@@ -3990,27 +3994,33 @@ fn flame_difference(
             current.quality.attempted
         )),
     ];
-    lines.extend(comparison.warnings.into_iter().map(Line::raw));
+    lines.extend(comparison.warnings.iter().map(|s| Line::raw(s.as_str())));
     lines.push(Line::raw(
         "   baseline    current       delta  call path (inclusive counts)",
     ));
     let needle = a.filter.to_lowercase();
-    for change in changes {
+    let header_len = lines.len();
+    let skip = (a.scroll as usize).saturating_sub(header_len);
+    let header_skip = (a.scroll as usize).min(header_len);
+    lines.drain(..header_skip);
+    let matching = prepared.matching(&needle);
+    for index in matching.iter().skip(skip) {
+        let change = &comparison.changes[*index];
+        if lines.len() >= bands[1].height as usize {
+            break;
+        }
         let path = change
             .path
             .iter()
             .map(|id| {
                 current
                     .frames
-                    .get(id)
-                    .or_else(|| baseline.frames.get(id))
+                    .get(id.as_str())
+                    .or_else(|| baseline.frames.get(id.as_str()))
                     .map_or(id.as_str(), |f| f.display.as_str())
             })
             .collect::<Vec<_>>()
             .join(" › ");
-        if !path.to_lowercase().contains(&needle) {
-            continue;
-        }
         lines.push(Line::styled(
             format!(
                 "{:11} {:10} {:+11.2}  {}",
@@ -4025,5 +4035,5 @@ fn flame_difference(
             }),
         ));
     }
-    f.render_widget(Paragraph::new(lines).scroll((a.scroll, 0)), bands[1]);
+    f.render_widget(Paragraph::new(lines), bands[1]);
 }

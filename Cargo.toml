@@ -1,6 +1,6 @@
 [package]
 name = "kernwatch"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 description = "Linux kernel observability in a Rust and Ratatui terminal"
 repository = "https://github.com/matthart1983/kernwatch"
@@ -14,7 +14,7 @@ exclude = ["screenshots/", "docs/reference/"]
 [dependencies]
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache", "underline-color"] }
 crossterm = "0.29"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 libc = "0.2"
 aya = "0.14"

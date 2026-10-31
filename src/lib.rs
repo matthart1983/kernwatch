@@ -42,3 +42,5 @@ pub mod bpf_metadata;
 pub mod demo;
 
 pub mod cpu_profile;
+
+pub mod cpu_cost;

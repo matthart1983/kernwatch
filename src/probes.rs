@@ -34,6 +34,12 @@ struct Event {
     text: [u8; 80],
 }
 pub struct Probes {
+    sorted_root: std::cell::RefCell<
+        Option<(
+            crate::flame::Shared<crate::flame::Node>,
+            crate::flame::Shared<crate::flame::Node>,
+        )>,
+    >,
     cpu_sampler: Option<crate::cpu_profile::Sampler>,
     capture_id: String,
     owned_attachments: BTreeMap<String, String>,
@@ -49,8 +55,8 @@ pub struct Probes {
     stacks: StackTraceMap<MapData>,
     pub correlator: Correlator,
     pending: BTreeMap<u64, (u64, u64, u64)>,
-    pub block_ms: Vec<f64>,
-    pub device_ms: BTreeMap<u64, Vec<f64>>,
+    pub block_ms: crate::tracing::LatencyWindow,
+    pub device_ms: BTreeMap<u64, crate::tracing::LatencyWindow>,
     last_loss: u64,
     pub mode: String,
     /// Thread the capture is scoped to; 0 when unscoped.
@@ -306,6 +312,7 @@ impl Probes {
                 .push("Kernel symbols restricted; addresses retained".into());
         }
         Ok(Self {
+            sorted_root: Default::default(),
             cpu_sampler,
             capture_id: crate::recording::stamp().to_string(),
             owned_attachments,
@@ -321,7 +328,7 @@ impl Probes {
             stacks,
             correlator: Correlator::default(),
             pending: BTreeMap::new(),
-            block_ms: Vec::new(),
+            block_ms: crate::tracing::LatencyWindow::default(),
             device_ms: BTreeMap::new(),
             last_loss: 0,
             mode: mode.into(),
@@ -356,6 +363,7 @@ impl Probes {
             .duration_since(self.started)
     }
     pub fn poll(&mut self) -> io::Result<()> {
+        let _cost = crate::cpu_cost::scope("probe.poll");
         self.profile.metadata.elapsed_seconds = self.elapsed().as_secs_f64();
         if let Some(sampler) = &mut self.cpu_sampler {
             sampler.poll(
@@ -513,14 +521,8 @@ impl Probes {
                             let device = *device;
                             let latencies = self.device_ms.entry(device).or_default();
                             latencies.push(e.ns.saturating_sub(start) as f64 / 1e6);
-                            if latencies.len() > 4096 {
-                                latencies.remove(0);
-                            }
                             self.pending.remove(&e.key);
                             self.block_ms.push(e.ns.saturating_sub(start) as f64 / 1e6);
-                            if self.block_ms.len() > 4096 {
-                                self.block_ms.remove(0);
-                            }
                         } else {
                             *remaining -= e.a;
                         }
@@ -544,6 +546,7 @@ impl Probes {
         Ok(())
     }
     pub fn apply(&self, t: &mut Telemetry) {
+        let _cost = crate::cpu_cost::scope("probe.publish");
         if self.mode == "cpu" {
             t.capabilities.insert("cpu".into(), Quality::Available);
         }
@@ -564,7 +567,17 @@ impl Probes {
         );
         if !self.profile.is_empty() || self.mode == "cpu" || self.profile.quality.attempted > 0 {
             let mut profile = self.profile.clone();
-            profile.sort();
+            let mut cache = self.sorted_root.borrow_mut();
+            if let Some((original, sorted)) = cache
+                .as_ref()
+                .filter(|(original, _)| original.same_version(&self.profile.root))
+            {
+                let _ = original;
+                profile.root = sorted.clone();
+            } else {
+                profile.sort();
+                *cache = Some((self.profile.root.clone(), profile.root.clone()));
+            }
             t.profile = profile;
         }
         if !self.stack_tally.is_empty() {
@@ -730,19 +743,13 @@ impl Probes {
                     .wake_ms
                     .values()
                     .flatten()
-                    .copied()
                     .collect::<Vec<_>>(),
             ),
             (
                 "syscall",
-                self.correlator
-                    .syscall_ms
-                    .values()
-                    .flatten()
-                    .copied()
-                    .collect(),
+                self.correlator.syscall_ms.values().flatten().collect(),
             ),
-            ("block", self.block_ms.clone()),
+            ("block", self.block_ms.iter().collect::<Vec<_>>()),
         ] {
             if !values.is_empty() {
                 let bounds = vec![
@@ -791,7 +798,7 @@ impl Probes {
             for value in values {
                 counts[bounds
                     .iter()
-                    .position(|b| value <= b)
+                    .position(|b| value <= *b)
                     .unwrap_or(bounds.len())] += 1;
             }
             t.histograms.insert(
@@ -806,16 +813,16 @@ impl Probes {
         for (pid, values) in &self.correlator.off_ms {
             t.record(
                 &format!("offcpu.{pid}"),
-                crate::tracing::percentile(values, 0.99),
+                values.percentile(0.99),
                 "ms",
                 1000.,
             );
-            t.details.insert(format!("offcpu:{pid}"),vec![("off-CPU p99 ms".into(),crate::tracing::percentile(values,0.99).unwrap_or(0.).to_string()),("scope".into(),"switch-out to switch-in; includes sleeping and runnable waiting; distinct from wake-to-run".into())]);
+            t.details.insert(format!("offcpu:{pid}"),vec![("off-CPU p99 ms".into(),values.percentile(0.99).unwrap_or(0.).to_string()),("scope".into(),"switch-out to switch-in; includes sleeping and runnable waiting; distinct from wake-to-run".into())]);
         }
         for (group, values) in &self.correlator.wake_cgroup {
             t.record(
                 &format!("sched.cgroup{group}"),
-                crate::tracing::percentile(values, 0.99),
+                values.percentile(0.99),
                 "ms",
                 20.,
             );
@@ -824,9 +831,7 @@ impl Probes {
                 vec![
                     (
                         "p99".into(),
-                        crate::tracing::percentile(values, 0.99)
-                            .unwrap_or(0.)
-                            .to_string(),
+                        values.percentile(0.99).unwrap_or(0.).to_string(),
                     ),
                     ("sample count".into(), values.len().to_string()),
                     (
@@ -844,17 +849,12 @@ impl Probes {
                     / 1_000_000_000) as u64;
                 t.record(
                     &format!("task.{pid}.{ticks}"),
-                    crate::tracing::percentile(values, 0.99),
+                    values.percentile(0.99),
                     "ms",
                     20.,
                 );
             }
-            t.record(
-                &format!("task.{pid}"),
-                crate::tracing::percentile(values, 0.99),
-                "ms",
-                20.,
-            );
+            t.record(&format!("task.{pid}"), values.percentile(0.99), "ms", 20.);
             t.details.insert(
                 format!("wake:{pid}"),
                 vec![
@@ -873,15 +873,11 @@ impl Probes {
                     ),
                     (
                         "p50".into(),
-                        crate::tracing::percentile(values, 0.5)
-                            .unwrap_or(0.)
-                            .to_string(),
+                        values.percentile(0.5).unwrap_or(0.).to_string(),
                     ),
                     (
                         "p99".into(),
-                        crate::tracing::percentile(values, 0.99)
-                            .unwrap_or(0.)
-                            .to_string(),
+                        values.percentile(0.99).unwrap_or(0.).to_string(),
                     ),
                 ],
             );
@@ -889,7 +885,7 @@ impl Probes {
         for (cpu, values) in &self.correlator.wake_cpu {
             t.record(
                 &format!("sched.cpu{cpu}"),
-                crate::tracing::percentile(values, 0.99),
+                values.percentile(0.99),
                 "ms",
                 20.,
             );
@@ -898,15 +894,11 @@ impl Probes {
                 vec![
                     (
                         "p50".into(),
-                        crate::tracing::percentile(values, 0.5)
-                            .unwrap_or(0.)
-                            .to_string(),
+                        values.percentile(0.5).unwrap_or(0.).to_string(),
                     ),
                     (
                         "p99".into(),
-                        crate::tracing::percentile(values, 0.99)
-                            .unwrap_or(0.)
-                            .to_string(),
+                        values.percentile(0.99).unwrap_or(0.).to_string(),
                     ),
                 ],
             );
@@ -919,7 +911,7 @@ impl Probes {
             for value in values {
                 let i = bounds
                     .iter()
-                    .position(|b| value <= b)
+                    .position(|b| value <= *b)
                     .unwrap_or(bounds.len());
                 counts[i] += 1;
             }
@@ -957,14 +949,8 @@ impl Probes {
                         "{:.6}ms",
                         values.iter().sum::<f64>() / values.len().max(1) as f64
                     ),
-                    format!(
-                        "{:.6}ms",
-                        crate::tracing::percentile(values, 0.99).unwrap_or(0.)
-                    ),
-                    format!(
-                        "{:.6}ms",
-                        values.iter().copied().reduce(f64::max).unwrap_or(0.)
-                    ),
+                    format!("{:.6}ms", values.percentile(0.99).unwrap_or(0.)),
+                    format!("{:.6}ms", values.iter().reduce(f64::max).unwrap_or(0.)),
                     self.correlator
                         .syscall_callers
                         .get(id)
@@ -1054,7 +1040,7 @@ impl Probes {
                 );
             }
         }
-        if let Some(v) = crate::tracing::percentile(&self.block_ms, 0.99) {
+        if let Some(v) = self.block_ms.percentile(0.99) {
             t.metrics.insert(
                 "disk.p99".into(),
                 Measurement {
@@ -1087,7 +1073,7 @@ impl Probes {
         }
         for (vector, values) in &self.correlator.vector_ms {
             if *vector >= 1_000_000 {
-                if let Some(value) = crate::tracing::percentile(values, 0.99) {
+                if let Some(value) = values.percentile(0.99) {
                     t.metrics.insert(
                         format!("irq.vec{}.p99", vector - 1_000_000),
                         Measurement::known(
@@ -1101,7 +1087,7 @@ impl Probes {
             }
         }
         for (device, values) in &self.device_ms {
-            if let Some(value) = crate::tracing::percentile(values, 0.99) {
+            if let Some(value) = values.percentile(0.99) {
                 let key = format!("block.dev{}:{}.p99", device >> 32, device & 0xffffffff);
                 t.metrics.insert(
                     key.clone(),

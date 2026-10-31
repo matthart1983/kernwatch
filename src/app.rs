@@ -48,6 +48,7 @@ pub enum FlameMove {
 }
 
 pub struct App {
+    comparison_cache: std::cell::RefCell<Option<crate::flame::PreparedComparison>>,
     pub flame_cpu: bool,
     pub flame_baseline: Option<crate::flame::Profile>,
     pub flame_compare: Option<crate::flame::ComparisonMode>,
@@ -75,6 +76,7 @@ pub struct App {
     demo_host: crate::actions::DemoHost,
     timeline_frames: VecDeque<(usize, Snapshot)>,
     timeline_bytes: usize,
+    timeline_profiles: Vec<(crate::flame::Profile, usize)>,
     latest_snapshot: Option<Snapshot>,
     pub clipboard: Option<String>,
     pub watched: std::collections::BTreeSet<(u32, u64)>,
@@ -118,6 +120,7 @@ pub struct App {
 impl App {
     pub fn new(snapshot: Snapshot) -> Self {
         let mut a = Self {
+            comparison_cache: Default::default(),
             flame_cpu: !snapshot.demo,
             flame_baseline: None,
             flame_compare: None,
@@ -137,6 +140,7 @@ impl App {
             demo_host: Default::default(),
             timeline_frames: VecDeque::new(),
             timeline_bytes: 0,
+            timeline_profiles: Vec::new(),
             latest_snapshot: None,
             clipboard: None,
             watched: Default::default(),
@@ -178,10 +182,57 @@ impl App {
             expanded: false,
         };
         a.push_history();
-        let first = a.snapshot.clone();
-        a.retain_frame(&first);
-        a.latest_snapshot = Some(first);
+        let mut first = a.snapshot.clone();
+        a.retain_frame(&mut first);
         a
+    }
+    pub fn collection_demand(&self) -> crate::sources::Demand {
+        let mut demand = crate::sources::Demand::default();
+        if self.snapshot.demo || self.replay.is_some() || self.frozen || self.time_cursor.is_some()
+        {
+            return demand;
+        }
+        demand.tasks.extend(self.watched.iter().take(32).copied());
+        if self.tab == 1 {
+            if let Some(t) = self.selected_task() {
+                demand.tasks.insert((t.pid, t.start_ticks));
+            }
+        } else if self.detail {
+            if let Some(key) = self
+                .rows()
+                .get(self.selected)
+                .and_then(|r| r.first())
+                .cloned()
+            {
+                match self.tab {
+                    4 => demand.device = Some(key),
+                    7 => demand.cgroup = Some(key),
+                    8 => demand.module = Some(key),
+                    _ => {}
+                }
+            }
+        }
+        demand
+    }
+    pub fn prepared_comparison(
+        &self,
+        baseline: &crate::flame::Profile,
+        mode: crate::flame::ComparisonMode,
+    ) -> Result<std::cell::Ref<'_, crate::flame::PreparedComparison>, String> {
+        let current = &self.snapshot.telemetry.profile;
+        let valid = self.comparison_cache.borrow().as_ref().is_some_and(|c| {
+            c.current.same_version(current)
+                && c.baseline.same_version(baseline)
+                && c.comparison.mode == mode
+        });
+        if !valid {
+            *self.comparison_cache.borrow_mut() = Some(crate::flame::PreparedComparison::new(
+                current, baseline, mode,
+            )?);
+        }
+        Ok(std::cell::Ref::map(self.comparison_cache.borrow(), |c| {
+            c.as_ref().unwrap()
+        }))
     }
     fn push_history(&mut self) {
         let c = &self.snapshot.cpu;
@@ -209,6 +260,9 @@ impl App {
     /// the timeline's reach is limited by what a frame retains, not by how it
     /// is counted.
     pub fn frame_bytes(frame: &Snapshot) -> usize {
+        Self::entity_bytes(frame) + Self::profile_bytes(&frame.telemetry.profile)
+    }
+    fn entity_bytes(frame: &Snapshot) -> usize {
         let t = &frame.telemetry;
         let strings = |fields: &[(String, String)]| -> usize {
             fields.iter().map(|(k, v)| k.len() + v.len() + 48).sum()
@@ -247,11 +301,6 @@ impl App {
                     .sum::<usize>()
             })
             .sum();
-        // The profile is retained with the frame so the time cursor still shows it.
-        fn nodes(n: &crate::flame::Node) -> usize {
-            48 + n.name.len() + n.children.iter().map(nodes).sum::<usize>()
-        }
-        let profile = nodes(&t.profile.root);
         let coarse = t.cgroups.len() * 512
             + t.devices.len() * 1024
             + t.modules.len() * 256
@@ -261,7 +310,66 @@ impl App {
         // headers, String capacity above length, and BTreeMap nodes. Calibrated
         // against RSS growth for 20 retained frames on a 2700-task host, the real
         // heap came to 2.19x this sum.
-        (tasks + details + events + views + coarse + profile + 4096) * 219 / 100
+        (tasks + details + events + views + coarse + 4096) * 219 / 100
+    }
+
+    fn profile_bytes(profile: &crate::flame::Profile) -> usize {
+        // The profile is retained with the frame so the time cursor still shows it.
+        fn nodes(n: &crate::flame::Node) -> usize {
+            48 + n.name.len() + n.children.iter().map(nodes).sum::<usize>()
+        }
+        let bytes = nodes(&profile.root)
+            + profile
+                .frames
+                .iter()
+                .map(|(k, v)| {
+                    k.capacity()
+                        + v.raw.capacity()
+                        + v.display.capacity()
+                        + v.image.capacity()
+                        + std::mem::size_of::<crate::flame::FrameInfo>()
+                        + 64
+                })
+                .sum::<usize>()
+            + profile
+                .tasks
+                .keys()
+                .map(|k| k.capacity() + 80)
+                .sum::<usize>()
+            + profile
+                .quality
+                .errors
+                .keys()
+                .map(|k| k.capacity() + 80)
+                .sum::<usize>()
+            + profile
+                .metadata
+                .warnings
+                .iter()
+                .map(|s| s.capacity() + 24)
+                .sum::<usize>()
+            + profile.source.capacity()
+            + profile.metadata.scope.capacity()
+            + profile.metadata.unit.capacity()
+            + profile.metadata.cpus.capacity() * 4;
+        bytes
+    }
+    fn recount_timeline_bytes(&mut self) {
+        self.timeline_profiles.retain(|(profile, _)| {
+            self.timeline_frames
+                .iter()
+                .any(|(_, s)| s.telemetry.profile.same_version(profile))
+        });
+        self.timeline_bytes = self
+            .timeline_frames
+            .iter()
+            .map(|(size, _)| size)
+            .sum::<usize>()
+            + self
+                .timeline_profiles
+                .iter()
+                .map(|(_, size)| size)
+                .sum::<usize>();
     }
 
     /// Oldest and newest retained frame times, for checking how far the time
@@ -276,7 +384,8 @@ impl App {
     /// frame costs megabytes only a handful fit in the budget, and refusing to
     /// thin at that size is what collapses the timeline to seconds.
     const MIN_FULL_RESOLUTION: usize = 8;
-    fn retain_frame(&mut self, snapshot: &Snapshot) {
+    fn retain_frame(&mut self, snapshot: &mut Snapshot) {
+        let _cost = crate::cpu_cost::scope("app.retain_frame");
         if self
             .timeline_frames
             .back()
@@ -284,9 +393,20 @@ impl App {
         {
             return;
         }
-        let mut frame = snapshot.clone();
-        frame.telemetry.series.clear();
-        let size = Self::frame_bytes(&frame);
+        let series = std::mem::take(&mut snapshot.telemetry.series);
+        let frame = snapshot.clone();
+        snapshot.telemetry.series = series;
+        let size = Self::entity_bytes(&frame);
+        if !self
+            .timeline_profiles
+            .iter()
+            .any(|(p, _)| p.same_version(&frame.telemetry.profile))
+        {
+            let profile_size = Self::profile_bytes(&frame.telemetry.profile);
+            self.timeline_profiles
+                .push((frame.telemetry.profile.clone(), profile_size));
+            self.timeline_bytes += profile_size;
+        }
         self.timeline_bytes += size;
         self.timeline_frames.push_back((size, frame));
         // A frame on a busy host holds several megabytes, so a fixed budget
@@ -310,14 +430,13 @@ impl App {
                 .map(|(_, frame)| frame)
                 .collect();
             self.timeline_frames = kept;
-            self.timeline_bytes = self.timeline_frames.iter().map(|(size, _)| size).sum();
+            self.recount_timeline_bytes();
         }
         while self.timeline_frames.len() > 600
             || (self.timeline_bytes > BUDGET && self.timeline_frames.len() > 1)
         {
-            if let Some((size, _)) = self.timeline_frames.pop_front() {
-                self.timeline_bytes = self.timeline_bytes.saturating_sub(size);
-            }
+            self.timeline_frames.pop_front();
+            self.recount_timeline_bytes();
         }
     }
     pub fn seek_time(&mut self, at: u64) {
@@ -330,9 +449,14 @@ impl App {
             self.time_cursor = None;
             return;
         }
+        if self.latest_snapshot.is_none() && at < self.snapshot.telemetry.at_ms {
+            self.latest_snapshot = Some(self.snapshot.clone());
+        }
         let latest = self.latest_snapshot.as_ref().unwrap_or(&self.snapshot);
         if at >= latest.telemetry.at_ms {
-            self.snapshot = latest.clone();
+            if let Some(latest) = self.latest_snapshot.take() {
+                self.snapshot = latest;
+            }
             self.time_cursor = None;
             return;
         }
@@ -360,6 +484,7 @@ impl App {
         }
     }
     pub fn update(&mut self, mut s: Snapshot) {
+        let _cost = crate::cpu_cost::scope("app.update");
         if s.demo && self.demo_scenario != "incident" {
             s.telemetry = crate::fixture::scenario(&self.demo_scenario);
             s.cpu = s.telemetry.cpus.iter().map(|c| c.busy).collect();
@@ -376,14 +501,18 @@ impl App {
             }
         }
         if self.replay.is_none() {
-            self.retain_frame(&s);
-            self.latest_snapshot = Some(s.clone());
+            self.retain_frame(&mut s);
+            self.latest_snapshot = None;
         }
         if let Some(rec) = self.recording.as_mut() {
             if let Err(e) = rec.push(&s) {
                 self.status = format!("Recording failed: {e}");
                 self.recording = None;
             }
+        }
+        if self.replay.is_none() && (self.frozen || self.time_cursor.is_some()) {
+            self.latest_snapshot = Some(s);
+            return;
         }
         if !self.frozen && self.replay.is_none() && self.time_cursor.is_none() {
             let identity = self.selected_task().map(|x| (x.pid, x.start_ticks));
@@ -2084,6 +2213,16 @@ impl App {
         let arg = parts.next().unwrap_or("").trim();
         match cmd {
             "profile-baseline" => {
+                if arg == "off" {
+                    // A retained baseline owns a whole profile tree and its
+                    // symbol table for the life of the process. Releasing it
+                    // also drops the prepared comparison built against it.
+                    self.flame_baseline = None;
+                    self.flame_compare = None;
+                    *self.comparison_cache.borrow_mut() = None;
+                    self.status = "Profile baseline released".into();
+                    return;
+                }
                 let result: Result<crate::flame::Profile, String> = if arg.is_empty() {
                     Ok(self.snapshot.telemetry.profile.clone())
                 } else {
@@ -2108,6 +2247,10 @@ impl App {
             "profile-diff" => {
                 if arg == "off" {
                     self.flame_compare = None;
+                    // The prepared comparison is only meaningful while a
+                    // comparison is displayed; it holds the current profile,
+                    // the baseline and a merged union tree.
+                    *self.comparison_cache.borrow_mut() = None;
                     return;
                 }
                 let mode = match arg {

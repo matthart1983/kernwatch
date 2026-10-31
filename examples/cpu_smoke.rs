@@ -58,6 +58,11 @@ fn collect(probe: &mut Probes, seconds: u64) -> std::io::Result<()> {
     }
     probe.finish()?;
     let total = probe.profile.root.samples;
+    assert_eq!(
+        total + probe.profile.quality.failed + probe.profile.quality.map_failures,
+        probe.profile.quality.attempted,
+        "final drain must account for every kernel attempt"
+    );
     probe.poll()?;
     assert_eq!(
         total, probe.profile.root.samples,

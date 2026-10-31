@@ -18,15 +18,15 @@ ROOT = Path(__file__).resolve().parents[1]
 WORK = Path(os.environ.get('KERNWATCH_DEMO_WORK', '/tmp/kernwatch-profile-demo'))
 
 
-def build():
+def build(workload):
     WORK.mkdir(parents=True, exist_ok=True)
     subprocess.run(['cargo', 'build', '--offline', '--locked', '--release'], cwd=ROOT, check=True)
-    subprocess.run(['cargo', 'build', '--offline', '--locked', '--release', '--example', 'profile_demo_workload'],
+    subprocess.run(['cargo', 'build', '--offline', '--locked', '--release', '--example', workload],
                    cwd=ROOT, env={**os.environ, 'RUSTFLAGS': '-C force-frame-pointers=yes'}, check=True)
     subprocess.run(['cc', '-O2', '-Wall', '-Werror', str(ROOT / 'scripts/profile_demo_init.c'),
                     '-o', str(WORK / 'init')], check=True)
     files = {'init': WORK / 'init', 'kernwatch': ROOT / 'target/release/kernwatch',
-             'profile-demo': ROOT / 'target/release/examples/profile_demo_workload'}
+             'profile-demo': ROOT / 'target/release/examples' / workload}
     for binary in list(files.values()):
         for lib in re.findall(r'(/[^\s()]+)', subprocess.check_output(['ldd', str(binary)], text=True)):
             path = Path(lib)
@@ -71,7 +71,7 @@ def run():
                    check=True, timeout=180)
 
 
-def verify():
+def verify(required=()):
     text = (WORK / 'evidence.log').read_text()
     reports = {}
     for name, payload in re.findall(r'BEGIN ([^\n]+)\n(.*?)\nEND', text, re.S):
@@ -91,6 +91,8 @@ def verify():
             f'{function} did not change by at least 20 percentage points in the expected direction'
     assert any(frame['raw'] != frame['display'] and 'parse_headers' in frame['display']
                for frame in frames.values()), 'Demangled workload symbol is missing'
+    for function in required:
+        assert any(function in frame['display'] for frame in frames.values()), f'{function} was never sampled'
     (WORK / 'verified-reports.json').write_text(json.dumps(reports, indent=2))
     print('Verified two real CPU captures and the exported baseline comparison.')
 
@@ -100,19 +102,22 @@ def main():
     parser.add_argument('--run', action='store_true', help='Run the prepared VM in this terminal')
     parser.add_argument('--build', action='store_true', help='Only prepare the VM')
     parser.add_argument('--verify', action='store_true', help='Only validate the exported profiles')
+    parser.add_argument('--flame', action='store_true', help='Use the flame graph workload and tape')
     args = parser.parse_args()
+    workload, tape = ('webapp', 'flame_demo.tape') if args.flame else ('profile_demo_workload', 'profile_demo.tape')
+    required = ('expand_block', 'siphash_round', 'compare_keys', 'vfs_write') if args.flame else ()
     if args.run:
         run()
     elif args.verify:
-        verify()
+        verify(required)
     else:
-        build()
+        build(workload)
         if not args.build:
             for tool in ('vhs', 'ffmpeg'):
                 if not shutil.which(tool):
                     raise SystemExit(f'{tool} is required')
-            subprocess.run(['vhs', str(ROOT / 'scripts/profile_demo.tape')], cwd=ROOT, check=True)
-            verify()
+            subprocess.run(['vhs', str(ROOT / 'scripts' / tape)], cwd=ROOT, check=True)
+            verify(required)
 
 
 if __name__ == '__main__':

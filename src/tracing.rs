@@ -2,7 +2,7 @@
 //! No global tracer state is changed. Source formats are inspected by the kernel.
 use crate::domain::*;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fs::{self, File, OpenOptions},
     io::{self, Read},
     os::unix::fs::OpenOptionsExt,
@@ -55,20 +55,20 @@ pub struct Correlator {
     pub group_migrations: BTreeMap<u64, u64>,
     pub task_starts: BTreeMap<u32, u64>,
     off: BTreeMap<u32, u64>,
-    pub off_ms: BTreeMap<u32, Vec<f64>>,
+    pub off_ms: BTreeMap<u32, LatencyWindow>,
     wake: BTreeMap<u32, (u64, u32)>,
     sys: BTreeMap<u32, (u64, u64, String)>,
     irq: BTreeMap<(u32, String), (u64, u64)>,
-    pub wake_ms: BTreeMap<u32, Vec<f64>>,
-    pub wake_cpu: BTreeMap<u32, Vec<f64>>,
-    pub wake_cgroup: BTreeMap<u64, Vec<f64>>,
+    pub wake_ms: BTreeMap<u32, LatencyWindow>,
+    pub wake_cpu: BTreeMap<u32, LatencyWindow>,
+    pub wake_cgroup: BTreeMap<u64, LatencyWindow>,
     pub migrations: BTreeMap<u32, u64>,
     pub switches: BTreeMap<u32, u64>,
     pub syscall_count: BTreeMap<u64, u64>,
-    pub syscall_ms: BTreeMap<u64, Vec<f64>>,
+    pub syscall_ms: BTreeMap<u64, LatencyWindow>,
     pub errors: BTreeMap<u64, u64>,
     pub vector_ns: BTreeMap<(u32, u64), u64>,
-    pub vector_ms: BTreeMap<u64, Vec<f64>>,
+    pub vector_ms: BTreeMap<u64, LatencyWindow>,
     pub errno_counts: BTreeMap<(u64, i64), u64>,
     pub syscall_callers: BTreeMap<u64, BTreeMap<u32, u64>>,
     pub events: Vec<Event>,
@@ -106,9 +106,6 @@ impl Correlator {
                         if e.at_ns >= start {
                             let values = self.off_ms.entry(next as u32).or_default();
                             values.push((e.at_ns - start) as f64 / 1e6);
-                            if values.len() > 4096 {
-                                values.remove(0);
-                            }
                         }
                     }
                 }
@@ -123,21 +120,12 @@ impl Correlator {
                             values.push((e.at_ns - start) as f64 / 1e6);
                             let cpu_values = self.wake_cpu.entry(e.cpu).or_default();
                             cpu_values.push((e.at_ns - start) as f64 / 1e6);
-                            if cpu_values.len() > 4096 {
-                                cpu_values.remove(0);
-                            }
-                            if values.len() > 4096 {
-                                values.remove(0);
-                            }
                             if let Some(group) = field(&e.payload, "cgroup").filter(|id| *id != 0) {
                                 if self.wake_cgroup.len() < 512
                                     || self.wake_cgroup.contains_key(&group)
                                 {
                                     let values = self.wake_cgroup.entry(group).or_default();
                                     values.push((e.at_ns - start) as f64 / 1e6);
-                                    if values.len() > 4096 {
-                                        values.remove(0);
-                                    }
                                 }
                             }
                             self.paired += 1;
@@ -187,9 +175,6 @@ impl Correlator {
                         *self.syscall_count.entry(id).or_default() += 1;
                         let v = self.syscall_ms.entry(id).or_default();
                         v.push((e.at_ns - start) as f64 / 1e6);
-                        if v.len() > 4096 {
-                            v.remove(0);
-                        }
                         if e.payload.contains("ret=-") || e.payload.contains("-> -") {
                             *self.errors.entry(id).or_default() += 1;
                         }
@@ -261,9 +246,6 @@ impl Correlator {
                         let key = if kind == "hard" { id + 1_000_000 } else { id };
                         let values = self.vector_ms.entry(key).or_default();
                         values.push((e.at_ns - start) as f64 / 1e6);
-                        if values.len() > 4096 {
-                            values.remove(0);
-                        }
                         self.paired += 1;
                     }
                 }
@@ -361,16 +343,11 @@ impl Correlator {
                 continue;
             }
             if let Some(values) = self.wake_ms.get(&task.pid) {
-                task.wake_p50_ms = percentile(values, 0.5);
-                task.wake_p99_ms = percentile(values, 0.99);
+                task.wake_p50_ms = values.percentile(0.5);
+                task.wake_p99_ms = values.percentile(0.99);
             }
         }
-        let all = self
-            .wake_cpu
-            .values()
-            .flatten()
-            .copied()
-            .collect::<Vec<_>>();
+        let all = self.wake_cpu.values().flatten().collect::<Vec<_>>();
         if let Some(p99) = percentile(&all, 0.99) {
             t.metrics.insert(
                 "sched.p99".into(),
@@ -395,11 +372,11 @@ impl Correlator {
             .extend(self.events.iter().rev().take(100).rev().cloned());
     }
 }
-pub fn percentile(values: &[f64], q: f64) -> Option<f64> {
-    if values.is_empty() {
+pub fn percentile_of<I: IntoIterator<Item = f64>>(values: I, q: f64) -> Option<f64> {
+    let mut v: Vec<f64> = values.into_iter().collect();
+    if v.is_empty() {
         return None;
     }
-    let mut v = values.to_vec();
     v.sort_by(f64::total_cmp);
     v.get(
         ((v.len() as f64 * q).ceil() as usize)
@@ -407,6 +384,63 @@ pub fn percentile(values: &[f64], q: f64) -> Option<f64> {
             .min(v.len() - 1),
     )
     .copied()
+}
+pub fn percentile(values: &[f64], q: f64) -> Option<f64> {
+    percentile_of(values.iter().copied(), q)
+}
+
+/// A bounded FIFO of latency samples.
+///
+/// Appending used to `Vec::push` and then `Vec::remove(0)` once full, so every
+/// event past the first `CAP` memmoved the whole buffer. At sustained trace
+/// rates that memmove dominated the tracer thread. A `VecDeque` drops the
+/// oldest sample in constant time instead, with the same retention.
+#[derive(Clone, Debug, Default)]
+pub struct LatencyWindow(VecDeque<f64>);
+
+impl LatencyWindow {
+    pub const CAP: usize = 4096;
+
+    pub fn push(&mut self, value: f64) {
+        if self.0.len() >= Self::CAP {
+            self.0.pop_front();
+        }
+        self.0.push_back(value);
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = f64> + '_ {
+        self.0.iter().copied()
+    }
+
+    pub fn percentile(&self, q: f64) -> Option<f64> {
+        percentile_of(self.iter(), q)
+    }
+}
+
+impl<'a> IntoIterator for &'a LatencyWindow {
+    type Item = f64;
+    type IntoIter = std::iter::Copied<std::collections::vec_deque::Iter<'a, f64>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter().copied()
+    }
+}
+
+impl FromIterator<f64> for LatencyWindow {
+    fn from_iter<I: IntoIterator<Item = f64>>(iter: I) -> Self {
+        let mut s = LatencyWindow::default();
+        for v in iter {
+            s.push(v);
+        }
+        s
+    }
 }
 pub struct TraceSession {
     path: PathBuf,
@@ -520,6 +554,28 @@ impl Drop for TraceSession {
 mod tests {
     use super::*;
     #[test]
+    fn samples_keep_the_newest_values_and_never_exceed_the_cap() {
+        let mut s = LatencyWindow::default();
+        for i in 0..(LatencyWindow::CAP + 500) {
+            s.push(i as f64);
+        }
+        assert_eq!(s.len(), LatencyWindow::CAP);
+        // The oldest 500 were dropped, so the window starts at 500.
+        assert_eq!(s.iter().next(), Some(500.));
+        assert_eq!(s.iter().last(), Some((LatencyWindow::CAP + 499) as f64));
+        // Percentiles read the retained window, matching the old Vec behaviour.
+        assert_eq!(
+            s.percentile(0.5),
+            percentile(&s.iter().collect::<Vec<_>>(), 0.5)
+        );
+    }
+    #[test]
+    fn samples_percentile_matches_the_slice_form() {
+        let s: LatencyWindow = [3., 1., 4., 2.].into_iter().collect();
+        assert_eq!(s.percentile(0.5), percentile(&[1., 3., 2., 4.], 0.5));
+        assert_eq!(LatencyWindow::default().percentile(0.99), None);
+    }
+    #[test]
     fn offcpu_is_distinct_from_wakeup_and_loss_breaks_pairing() {
         let mut c = Correlator::default();
         let event = |at_ns, payload: &str| TraceEvent {
@@ -541,20 +597,20 @@ mod tests {
             10_000_000,
             "prev_pid=8 next_pid=7 prev_state=R cgroup=100",
         ));
-        assert_eq!(c.off_ms[&7], vec![9.]);
-        assert_eq!(c.wake_ms[&7], vec![1.]);
-        assert_eq!(c.wake_cgroup[&100], vec![1.]);
+        assert_eq!(c.off_ms[&7].iter().collect::<Vec<_>>(), vec![9.]);
+        assert_eq!(c.wake_ms[&7].iter().collect::<Vec<_>>(), vec![1.]);
+        assert_eq!(c.wake_cgroup[&100].iter().collect::<Vec<_>>(), vec![1.]);
         c.consume(event(11_000_000, "prev_pid=7 next_pid=8 prev_state=S"));
         c.loss(1);
         c.consume(event(20_000_000, "prev_pid=8 next_pid=7 prev_state=R"));
-        assert_eq!(c.off_ms[&7], vec![9.]);
+        assert_eq!(c.off_ms[&7].iter().collect::<Vec<_>>(), vec![9.]);
     }
     #[test]
     fn parse_and_pair() {
         let mut c = Correlator::default();
         c.consume(parse("task-10 [003] d..2 100.000000: sched_wakeup: comm=envoy pid=42 prio=120 target_cpu=3").unwrap());
         c.consume(parse("idle-0 [003] d..2 100.018000: sched_switch: prev_comm=idle prev_pid=0 prev_state=S ==> next_comm=envoy next_pid=42").unwrap());
-        assert_eq!(c.wake_ms[&42], vec![18.]);
+        assert_eq!(c.wake_ms[&42].iter().collect::<Vec<_>>(), vec![18.]);
     }
     #[test]
     fn loss_invalidates_pending() {

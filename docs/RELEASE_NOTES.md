@@ -1,3 +1,24 @@
+## kernwatch v0.5.0
+
+Cuts kernwatch's own CPU and memory use, and most of the growth that came from leaving it open.
+
+| Dense view, no probes, two runs each | v0.4.1 | v0.5.0 |
+| --- | ---: | ---: |
+| CPU including helpers, % of one core | 35.35, 54.00 | 14.71, 10.28 |
+| RSS at 675 s | 546.7, 608.1 MiB | 149.5, 152.2 MiB |
+
+Measured old/new/new/old on a 24-CPU host with about 570 visible processes, both built with the same compiler. The host wasn't quiet: other builds were running, and the second v0.4.1 run saw the most load. Read these as direction and rough size, not exact levels. RSS still rises until the 600-sample history fills, and CPU still climbs a little as it does: the quietest v0.5.0 run went from 8.2% to 12.6% of one core over 660 seconds.
+
+- Share history between snapshots instead of copying it, and count profile symbols against the timeline budget. On the reference host, RSS moved 1.7 MiB over the 21 minutes after the 600-sample history filled.
+- Run metadata helpers on demand instead of on a timer. `scripts/monitor_bench.py` now counts live helper processes as observer CPU.
+- Build a large profile comparison once and reuse it. Scrolling and filtering no longer rebuild it, and a finished capture no longer redraws unchanged data. On the 8,192-path stress profiles, a redraw takes under 1 ms, down from 154 ms and 417 ms.
+- Keep latency samples in a bounded window that drops the oldest in constant time, and bound CPU count-map scans.
+- `profile-baseline off` releases a retained baseline. Status changes now redraw while the view is frozen.
+- The zoomed Flame title and its share line name frames instead of printing raw identities.
+- Add `--version`, `SECURITY.md` and a release guard that refuses a tag unless it matches the crate version and is on main. Release pages now show only their own notes.
+
+Full figures and their limits are in the [performance review](https://github.com/matthart1983/kernwatch/blob/v0.5.0/docs/PERFORMANCE_REVIEW.md).
+
 ## kernwatch v0.4.1
 
 Updates the terminal UI, terminal input, BPF loader, and C++ demangler dependencies while preserving the existing Rust edition and release optimisation settings.

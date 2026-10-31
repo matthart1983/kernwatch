@@ -3,6 +3,12 @@ use crate::domain::*;
 use std::{collections::BTreeMap, fs, os::unix::fs::MetadataExt, path::Path};
 #[derive(Default)]
 pub struct Inventory {
+    group_paths: Vec<std::path::PathBuf>,
+    group_discovered: u64,
+    group_config: BTreeMap<std::path::PathBuf, Result<String, std::io::ErrorKind>>,
+    group_dynamic: BTreeMap<std::path::PathBuf, Result<String, std::io::ErrorKind>>,
+    group_identities: BTreeMap<std::path::PathBuf, u64>,
+    group_demand: Option<String>,
     extra: crate::enrichment::Extra,
     journal: crate::logs::Journal,
     irq: crate::irq::Collector,
@@ -207,6 +213,35 @@ impl Inventory {
                 .is_some_and(|s| at.saturating_sub(s.at_ms) < 600000)
         });
     }
+    fn group_read(&mut self, path: impl AsRef<Path>) -> std::io::Result<String> {
+        let path = path.as_ref();
+        let config = matches!(
+            path.file_name().and_then(|s| s.to_str()),
+            Some(
+                "cpu.max"
+                    | "cpu.weight"
+                    | "cpuset.cpus.effective"
+                    | "memory.high"
+                    | "memory.max"
+                    | "pids.max"
+            )
+        );
+        let cache = if config {
+            &mut self.group_config
+        } else {
+            &mut self.group_dynamic
+        };
+        cache
+            .entry(path.to_path_buf())
+            .or_insert_with(|| fs::read_to_string(path).map_err(|e| e.kind()))
+            .clone()
+            .map_err(std::io::Error::from)
+    }
+    fn group_text(&mut self, path: impl AsRef<Path>) -> String {
+        self.group_read(path)
+            .map(|s| s.trim().to_owned())
+            .unwrap_or_else(|e| format!("unavailable: {e}"))
+    }
     pub fn groups(&mut self, t: &mut Telemetry) {
         let at = t.at_ms;
         if let Err(e) = fs::read_to_string("/sys/fs/cgroup/cgroup.controllers") {
@@ -214,26 +249,49 @@ impl Inventory {
                 .insert("cgroups".into(), Quality::Error(format!("cgroup v2: {e}")));
             return;
         }
-        let mut pending = vec![std::path::PathBuf::from("/sys/fs/cgroup")];
-        let mut i = 0;
-        while i < pending.len() && i < 512 {
-            let root = pending[i].clone();
-            i += 1;
-            if let Ok(es) = fs::read_dir(&root) {
-                for e in es.flatten() {
-                    if pending.len() < 512 && e.file_type().is_ok_and(|t| t.is_dir()) {
-                        pending.push(e.path());
+        let demand = crate::sources::demand().cgroup;
+        self.group_dynamic.clear();
+        if self.group_paths.is_empty()
+            || at.saturating_sub(self.group_discovered) >= 5000
+            || demand != self.group_demand
+        {
+            self.group_paths = vec![std::path::PathBuf::from("/sys/fs/cgroup")];
+            let mut i = 0;
+            while i < self.group_paths.len() && i < 512 {
+                if let Ok(entries) = fs::read_dir(&self.group_paths[i]) {
+                    for entry in entries.flatten() {
+                        if self.group_paths.len() < 512
+                            && entry.file_type().is_ok_and(|t| t.is_dir())
+                        {
+                            self.group_paths.push(entry.path());
+                        }
                     }
                 }
+                i += 1;
             }
+            self.group_discovered = at;
+            self.group_config.clear();
+            self.group_identities
+                .retain(|p, _| self.group_paths.contains(p));
+            self.group_demand = demand;
+        }
+        for root in self.group_paths.clone() {
             let Ok(meta) = fs::metadata(&root) else {
                 continue;
             };
+            if self
+                .group_identities
+                .insert(root.clone(), meta.ino())
+                .is_some_and(|old| old != meta.ino())
+            {
+                self.group_config
+                    .retain(|p, _| p.parent() != Some(root.as_path()));
+            }
             let path = format!(
                 "/{}",
                 root.strip_prefix("/sys/fs/cgroup").unwrap().display()
             );
-            let stat = read(root.join("cpu.stat"));
+            let stat = self.group_text(root.join("cpu.stat"));
             let counts = counters(&stat);
             let usage = counts.get("usage_usec").copied();
             let throttle = counts.get("throttled_usec").copied();
@@ -246,9 +304,9 @@ impl Inventory {
                 inode: meta.ino(),
                 runtime_pct: rate.as_ref().map(|v| v[0] / 10000.),
                 throttled_ms_s: throttle_rate.as_ref().map(|v| v[0] / 1000.),
-                memory_bytes: read(root.join("memory.current")).parse().ok(),
-                quota: read(root.join("cpu.max")),
-                cpus: read(root.join("cpuset.cpus.effective")),
+                memory_bytes: self.group_text(root.join("memory.current")).parse().ok(),
+                quota: self.group_text(root.join("cpu.max")),
+                cpus: self.group_text(root.join("cpuset.cpus.effective")),
                 ..Default::default()
             };
             for file in [
@@ -266,9 +324,10 @@ impl Inventory {
                 "memory.pressure",
                 "io.pressure",
             ] {
-                group
-                    .fields
-                    .push((file.into(), read(root.join(file)).replace('\n', " · ")));
+                group.fields.push((
+                    file.into(),
+                    self.group_text(root.join(file)).replace('\n', " · "),
+                ));
             }
             let mut cpu_limit: Option<(f64, String)> = None;
             let mut memory_limit: Option<(u64, String)> = None;
@@ -283,7 +342,7 @@ impl Inventory {
                     .display()
                     .to_string();
                 let source = format!("/{}", source);
-                match fs::read_to_string(ancestor.join("cpu.max")) {
+                match self.group_read(ancestor.join("cpu.max")) {
                     Ok(raw) => {
                         let words: Vec<_> = raw.split_whitespace().collect();
                         if let [quota, period] = words.as_slice() {
@@ -306,7 +365,7 @@ impl Inventory {
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                     Err(_) => limits_complete = false,
                 }
-                match fs::read_to_string(ancestor.join("memory.max")) {
+                match self.group_read(ancestor.join("memory.max")) {
                     Ok(raw) if raw.trim() == "max" => {}
                     Ok(raw) => match raw.trim().parse::<u64>() {
                         Ok(bytes) if memory_limit.as_ref().is_none_or(|(v, _)| bytes < *v) => {
@@ -346,7 +405,7 @@ impl Inventory {
                         .unwrap_or("no finite limit observed".into())
                 },
             ));
-            if let Ok(raw) = fs::read_to_string(root.join("io.stat")) {
+            if let Ok(raw) = self.group_read(root.join("io.stat")) {
                 for line in raw.lines() {
                     let mut fields = line.split_whitespace();
                     let Some(device) = fields.next() else {
@@ -374,6 +433,10 @@ impl Inventory {
                     }
                 }
             }
+            group.fields.push((
+                "configuration sampled boot ms".into(),
+                self.group_discovered.to_string(),
+            ));
             group.fields.push((
                 "runtime (one CPU)".into(),
                 format!("{}%", fmt(group.runtime_pct)),

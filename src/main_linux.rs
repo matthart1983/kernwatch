@@ -34,8 +34,12 @@ impl Drop for Guard {
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("kernwatch {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("kernwatch — Linux kernel observability\n\nkernwatch [--demo | --replay FILE] [--view NAME] [--at MS] [--snapshot | --render WIDTHxHEIGHT] [--trace]\n\nLive mode reads procfs/sysfs. --demo uses a synthetic incident. --demo-tour runs a guided synthetic tour; any key takes control.\n--trace starts a bounded 30-second BPF capture (requires kernel permissions).\n--replay reads recorded frames without sampling the host; --at selects a recorded time.\n--snapshot prints JSON. --render prints a terminal frame.\nViews: dense overview tasks scheduler memory block syscalls irq cgroups modules ebpf dmesg diagnose flame\nKeys: Tab focus, [ ] views, Enter drill, Esc back, / filter, f freeze, r record, e export, : commands, ? help, q quit");
+        println!("kernwatch — Linux kernel observability\n\nkernwatch [--demo | --replay FILE] [--view NAME] [--at MS] [--snapshot | --render WIDTHxHEIGHT] [--trace] [--version]\n\nLive mode reads procfs/sysfs. --demo uses a synthetic incident. --demo-tour runs a guided synthetic tour; any key takes control.\n--trace starts a bounded 30-second BPF capture (requires kernel permissions).\n--replay reads recorded frames without sampling the host; --at selects a recorded time.\n--snapshot prints JSON. --render prints a terminal frame.\nViews: dense overview tasks scheduler memory block syscalls irq cgroups modules ebpf dmesg diagnose flame\nKeys: Tab focus, [ ] views, Enter drill, Esc back, / filter, f freeze, r record, e export, : commands, ? help, q quit");
         return Ok(());
     }
     let mut demo = false;
@@ -193,6 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut session: Option<kernwatch::probes::Probes> = None;
         let mut started = Instant::now();
         let mut duration = Duration::from_secs(30);
+        let mut published = Instant::now() - Duration::from_secs(1);
         while !ts.load(Ordering::Relaxed) {
             while let Ok(mode) = probe_rx.try_recv() {
                 finish_trace(&mut session, &mut td.lock().unwrap().0);
@@ -228,7 +233,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     td.lock().unwrap().1 = format!("Trace read failed: {e}");
                     finish_trace(&mut session, &mut td.lock().unwrap().0);
                     mark_trace_stopped(&mut td.lock().unwrap().0);
-                } else {
+                } else if published.elapsed() >= Duration::from_millis(250) {
+                    published = Instant::now();
                     let mut telemetry = kernwatch::domain::Telemetry {
                         at_ms: kernwatch::enrich::monotonic_ms(),
                         ..Default::default()
@@ -270,6 +276,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             next_sample += Duration::from_secs(1);
             if next_sample <= Instant::now() {
+                kernwatch::cpu_cost::counter("collector_missed_deadlines", 1);
                 next_sample = Instant::now() + Duration::from_secs(1);
             }
             while !stopped.load(Ordering::Relaxed) {
@@ -299,12 +306,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tour_started = Instant::now();
     let mut tour_scene = 0;
     let mut last_tick = Instant::now();
+    let mut dirty = true;
+    let mut input_at: Option<Instant> = None;
     let result = (|| -> io::Result<()> {
         while !app.quit && !EXIT_REQUESTED.load(Ordering::Relaxed) {
+            let before_tick = (app.replay_index, app.status.clone());
             app.tick(last_tick.elapsed().as_millis() as u64);
+            dirty |= before_tick != (app.replay_index, app.status.clone());
             last_tick = Instant::now();
             live_enabled.store(app.replay.is_none(), Ordering::Relaxed);
+            kernwatch::sources::set_demand(app.collection_demand());
             if let Some(mut s) = latest.lock().unwrap().take() {
+                dirty |= !app.frozen && app.time_cursor.is_none();
                 if !s.demo {
                     let data = trace_data.lock().unwrap();
                     if let Some(c) = &data.0 {
@@ -332,7 +345,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     name: key.clone(),
                                     unit: measurement.unit.clone(),
                                     max: 1.,
-                                    samples: Vec::new(),
+                                    samples: Default::default(),
                                 }
                             });
                             let value =
@@ -365,12 +378,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         baseline_saved = Instant::now();
                     }
                 }
+                kernwatch::cpu_cost::observe("publication_lag_ms", kernwatch::enrich::monotonic_ms().saturating_sub(s.telemetry.at_ms));
                 app.update(s);
                 if !app.snapshot.demo {
                     let status = trace_data.lock().unwrap().1.clone();
                     if status != last_trace_status {
                         last_trace_status = status.clone();
                         app.status = status;
+                        dirty = true;
                     }
                 }
             }
@@ -402,15 +417,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if scene != tour_scene {
                     kernwatch::demo::show(&mut app, scene);
                     tour_scene = scene;
+                    dirty = true;
                 }
             }
+            // Recording/source failures can change status while the data view is frozen.
+            dirty |= before_tick.1 != app.status;
+            if dirty {
             execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
+            let draw_cost = kernwatch::cpu_cost::scope("main.draw");
             let drawn = terminal.draw(|f| ui::draw(f, &app)).map(|_| ());
             let finished = execute!(terminal.backend_mut(), EndSynchronizedUpdate);
             drawn?;
             finished?;
+            drop(draw_cost);
+            if let Some(at) = input_at.take() { kernwatch::cpu_cost::observe("input_to_draw_us", at.elapsed().as_micros() as u64); }
+            dirty = false;
+            }
             if event::poll(Duration::from_millis(100))? {
-                if let Event::Key(k) = event::read()? {
+                let event = event::read()?;
+                input_at = Some(Instant::now());
+                dirty |= matches!(event, Event::Key(_) | Event::Resize(_, _));
+                if let Event::Key(k) = event {
                     if k.kind != KeyEventKind::Release {
                         if demo_tour {
                             demo_tour = false;
@@ -439,6 +466,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     stop.store(true, Ordering::Relaxed);
     let _ = worker.map(|h| h.join());
     let _ = tracer.map(|h| h.join());
+    kernwatch::cpu_cost::flush();
     result?;
     Ok(())
 }

@@ -233,6 +233,8 @@ pub fn incident() -> Telemetry {
         ),
     ] {
         t.tasks.push(Task {
+            status_at_ms: Some(t.at_ms),
+            status_interval_ms: Some(1000),
             nice: Some(0),
             age_ms: Some(NOW.saturating_sub((100 + pid as u64 * 2) * 10)),
             anon_bytes: Some(rss * 1048576 * 80 / 100),
@@ -660,7 +662,7 @@ pub fn incident() -> Telemetry {
         if let Some(mut series) = t.series.get("disk.p99").cloned() {
             series.name = format!("block.dev{}.p99", d.major_minor);
             if i == 1 {
-                for sample in &mut series.samples {
+                for sample in series.samples.iter_mut() {
                     sample.value = Some(0.3);
                 }
             }
@@ -679,7 +681,7 @@ pub fn incident() -> Telemetry {
                 }
                 .unwrap_or(0.);
                 let original = series.at(NOW).unwrap_or(1.).max(0.001);
-                for sample in &mut series.samples {
+                for sample in series.samples.iter_mut() {
                     sample.value = sample.value.map(|v| v * target / original);
                 }
                 series.max = (series.max * target / original).max(1.);
@@ -757,7 +759,7 @@ pub fn incident() -> Telemetry {
         if let Some(mut series) = t.series.get("sched.p99").cloned() {
             series.name = format!("sched.cgroup{}", group.inode);
             if !path.ends_with("envoy.service") {
-                for sample in &mut series.samples {
+                for sample in series.samples.iter_mut() {
                     sample.value = Some(0.5);
                 }
             }
@@ -785,7 +787,7 @@ pub fn incident() -> Telemetry {
             if let Some(mut series) = t.series.get(key).cloned() {
                 series.name = format!("cgroup:{path}:{suffix}");
                 if suffix == "cpu" {
-                    for sample in &mut series.samples {
+                    for sample in series.samples.iter_mut() {
                         sample.value = sample.value.map(|v| v * runtime / 7.);
                     }
                     series.max = series.max.max(runtime * 1.2);
@@ -959,7 +961,7 @@ pub fn incident() -> Telemetry {
             name: format!("syscall.{name}.p99"),
             unit: "ms".into(),
             max: p99 * 1.2,
-            samples: Vec::new(),
+            samples: Default::default(),
         };
         for i in 1..=600 {
             series.push(i * 1000, Some(p99 * if i < 522 { 0.3 } else { 1. }));
@@ -979,7 +981,7 @@ pub fn incident() -> Telemetry {
             name: format!("bpf.program{id}"),
             unit: "% / one CPU".into(),
             max: 5.,
-            samples: Vec::new(),
+            samples: Default::default(),
         };
         for i in 1..=600 {
             series.push(i * 1000, Some(pct));
@@ -1009,7 +1011,7 @@ pub fn incident() -> Telemetry {
                 name: "events.rate".into(),
                 unit: "events/s".into(),
                 max: 4.,
-                samples: Vec::new(),
+                samples: Default::default(),
             })
             .push(at, Some(count as f64));
     }
@@ -1068,7 +1070,7 @@ pub fn incident() -> Telemetry {
         if let Some(mut series) = t.series.get("sched.p99").cloned() {
             series.name = format!("sched.cpu{}", cpu.id);
             if cpu.id != 3 {
-                for sample in &mut series.samples {
+                for sample in series.samples.iter_mut() {
                     sample.value = Some(0.5);
                 }
             }
@@ -1083,7 +1085,7 @@ pub fn incident() -> Telemetry {
     for (id, rate) in [(47, 148000.), (48, 31000.), (52, 2000.)] {
         if let Some(mut s) = t.series.get("irq.rate").cloned() {
             s.name = format!("irq.{id}.rate");
-            for p in &mut s.samples {
+            for p in s.samples.iter_mut() {
                 p.value = p.value.map(|v| v * rate / 148000.);
             }
             s.max = rate * 1.2;
@@ -1094,7 +1096,7 @@ pub fn incident() -> Telemetry {
         if let Some(mut s) = t.series.get("softirq").cloned() {
             s.name = format!("softirq.cpu{}", c.id);
             if c.id != 3 {
-                for p in &mut s.samples {
+                for p in s.samples.iter_mut() {
                     p.value = Some(c.softirq);
                 }
             }
@@ -1134,7 +1136,7 @@ pub fn incident() -> Telemetry {
         );
     }
     if let Some(series) = t.series.get_mut("disk.age") {
-        for sample in &mut series.samples {
+        for sample in series.samples.iter_mut() {
             sample.value = Some(sample.at_ms.saturating_sub(595900) as f64);
         }
     }
@@ -1267,7 +1269,7 @@ pub fn scenario(name: &str) -> Telemetry {
 
             for task in t.tasks.iter().filter(|task| task.name.starts_with("envoy")) {
                 if let Some(series) = t.series.get_mut(&format!("task.runtime{}", task.pid)) {
-                    for sample in &mut series.samples {
+                    for sample in series.samples.iter_mut() {
                         if sample.at_ms > 400000 {
                             sample.value = task.cpu_pct;
                         }
@@ -1297,7 +1299,7 @@ pub fn scenario(name: &str) -> Telemetry {
                     || key.ends_with("envoy.service:throttled")
                     || key.ends_with("envoy.service:cpu")
                 {
-                    for p in &mut series.samples {
+                    for p in series.samples.iter_mut() {
                         if p.at_ms > 400000 {
                             p.value = Some(if key.ends_with(":cpu") { 50. } else { 310. });
                         }
@@ -1555,19 +1557,19 @@ fn synchronize_current(t: &mut Telemetry) {
 
     // Derive shared histories from the same disjoint CPU components and task runtimes.
     if let Some(series) = t.series.get_mut("softirq") {
-        for sample in &mut series.samples {
+        for sample in series.samples.iter_mut() {
             sample.value = sample.value.map(|v| v.min(93.));
         }
     }
     if let Some(soft) = t.series.get("softirq").cloned() {
         if let Some(cpu) = t.series.get_mut("cpu.3") {
-            for sample in &mut cpu.samples {
+            for sample in cpu.samples.iter_mut() {
                 sample.value = soft.at(sample.at_ms).map(|v| v.min(93.) + 7.);
             }
         }
         for key in ["softirq.cpu3", "task.runtime34"] {
             if let Some(series) = t.series.get_mut(key) {
-                for sample in &mut series.samples {
+                for sample in series.samples.iter_mut() {
                     sample.value = soft.at(sample.at_ms).map(|v| v.min(93.));
                 }
             }
@@ -1586,7 +1588,7 @@ fn synchronize_current(t: &mut Telemetry) {
             .filter_map(|task| t.series.get(&format!("task.runtime{}", task.pid)).cloned())
             .collect::<Vec<_>>();
         if let Some(series) = t.series.get_mut(&key) {
-            for sample in &mut series.samples {
+            for sample in series.samples.iter_mut() {
                 sample.value = Some(histories.iter().filter_map(|s| s.at(sample.at_ms)).sum());
             }
         }

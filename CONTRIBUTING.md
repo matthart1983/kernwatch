@@ -23,6 +23,6 @@ Do not commit live recordings, reports, host audit output, credentials, or gener
 
 ## Binary releases
 
-Update the package version and `docs/RELEASE_NOTES.md`, then push a matching `v` tag (for example, `v0.1.0`). `.github/workflows/release.yml` builds and tests all four Linux targets, packages executable archives with SHA-256 checksums, and publishes only after every build passes. The manual dispatch accepts an existing tag. Existing published assets are not overwritten; a failed draft publication can be inspected and completed through GitHub Releases.
+Update the package version and add a `## kernwatch vX.Y.Z` section at the top of `docs/RELEASE_NOTES.md`, then push a matching `v` tag (for example, `v0.1.0`) from a commit on main. `scripts/release-guard.sh` refuses anything else. `.github/workflows/release.yml` builds and tests all four Linux targets, packages executable archives with SHA-256 checksums, and publishes only after every build passes. The manual dispatch accepts an existing tag. Existing published assets are not overwritten; a failed draft publication can be inspected and completed through GitHub Releases.
 
 The older `scripts/package_release.py` packages a local evidence bundle and requires separate privileged VM logs. It is not the binary release pipeline.
