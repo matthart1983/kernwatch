@@ -1156,6 +1156,49 @@ pub fn syscall_name(id: u64) -> String {
         (libc::SYS_epoll_pwait, "epoll_pwait"),
         (libc::SYS_openat, "openat"),
         (libc::SYS_newfstatat, "newfstatat"),
+        (libc::SYS_fstat, "fstat"),
+        (libc::SYS_statx, "statx"),
+        (libc::SYS_lseek, "lseek"),
+        (libc::SYS_pread64, "pread64"),
+        (libc::SYS_pwrite64, "pwrite64"),
+        (libc::SYS_readv, "readv"),
+        (libc::SYS_writev, "writev"),
+        (libc::SYS_fdatasync, "fdatasync"),
+        (libc::SYS_getdents64, "getdents64"),
+        (libc::SYS_unlinkat, "unlinkat"),
+        (libc::SYS_ioctl, "ioctl"),
+        (libc::SYS_fcntl, "fcntl"),
+        (libc::SYS_ppoll, "ppoll"),
+        (libc::SYS_pselect6, "pselect6"),
+        (libc::SYS_io_uring_enter, "io_uring_enter"),
+        (libc::SYS_mprotect, "mprotect"),
+        (libc::SYS_munmap, "munmap"),
+        (libc::SYS_mremap, "mremap"),
+        (libc::SYS_madvise, "madvise"),
+        (libc::SYS_brk, "brk"),
+        (libc::SYS_socket, "socket"),
+        (libc::SYS_connect, "connect"),
+        (libc::SYS_accept4, "accept4"),
+        (libc::SYS_sendto, "sendto"),
+        (libc::SYS_recvfrom, "recvfrom"),
+        (libc::SYS_sendmsg, "sendmsg"),
+        (libc::SYS_recvmsg, "recvmsg"),
+        (libc::SYS_rt_sigaction, "rt_sigaction"),
+        (libc::SYS_rt_sigprocmask, "rt_sigprocmask"),
+        (libc::SYS_rt_sigreturn, "rt_sigreturn"),
+        (libc::SYS_sigaltstack, "sigaltstack"),
+        (libc::SYS_tgkill, "tgkill"),
+        (libc::SYS_sched_yield, "sched_yield"),
+        (libc::SYS_clone3, "clone3"),
+        (libc::SYS_exit_group, "exit_group"),
+        (libc::SYS_rseq, "rseq"),
+        (libc::SYS_prctl, "prctl"),
+        (libc::SYS_getpid, "getpid"),
+        (libc::SYS_gettid, "gettid"),
+        (libc::SYS_uname, "uname"),
+        (libc::SYS_getrandom, "getrandom"),
+        (libc::SYS_bpf, "bpf"),
+        (libc::SYS_perf_event_open, "perf_event_open"),
     ];
     #[cfg(target_arch = "x86_64")]
     if id == libc::SYS_epoll_wait as u64 {
@@ -1332,6 +1375,8 @@ mod architecture_tests {
     fn syscall_names_follow_the_target_abi() {
         assert_eq!(super::syscall_name(libc::SYS_read as u64), "read");
         assert_eq!(super::syscall_name(libc::SYS_openat as u64), "openat");
+        assert_eq!(super::syscall_name(libc::SYS_lseek as u64), "lseek");
+        assert_eq!(super::syscall_name(libc::SYS_munmap as u64), "munmap");
         assert_eq!(
             super::syscall_name(u64::MAX),
             format!("syscall_{}", u64::MAX)

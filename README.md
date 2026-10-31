@@ -12,11 +12,11 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/matthart1983/kernwatch/main/screenshots/demo/kernwatch-flame.gif" alt="kernwatch flame graph: capture stacks, follow the hottest path, zoom, search and compare two captures" width="900">
+  <img src="https://raw.githubusercontent.com/matthart1983/kernwatch/main/screenshots/demo/kernwatch-tour.gif" alt="kernwatch touring its views on a live Linux VM: CPU, tasks, scheduler, memory, block, syscalls, IRQs, cgroups, modules, eBPF, kernel log, diagnosis and flame graph" width="900">
 </p>
 
 <p align="center">
-  <em>Real CPU samples from a purpose-built demo workload in a Linux VM; not a performance benchmark.</em>
+  <em>Real readings from a staged workload in a Linux VM; not a performance benchmark.</em>
 </p>
 
 Investigate CPU contention, scheduling, memory pressure, block IO and interrupts.
@@ -78,7 +78,7 @@ Use 160 columns for the full dashboard; compact layouts work at 80×24.
 Press `F`, select a process and press `Enter` to capture CPU stacks. `x` stops
 and keeps the capture, `B` saves a baseline, and `D` compares it with the next
 capture. `e` exports profiles and folded stacks.
-[Profiling guide](docs/FLAME_GRAPHS.md).
+[Profiling guide](docs/FLAME_GRAPHS.md) · [Flame graph demo](screenshots/demo/kernwatch-flame.gif).
 
 Ordinary counters use procfs/sysfs. Request-level latency and syscall tracing
 require an explicit capture, supported kernel features and BPF permissions.
