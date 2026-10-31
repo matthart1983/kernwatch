@@ -3745,7 +3745,12 @@ fn flame_picker(f: &mut Frame, r: Rect, a: &App) {
         format!(
             "{} {} · C toggles CPU/syscall capture · B baseline · D compare",
             subjects.len(),
-            if threads { "threads" } else { "processes" }
+            match (threads, subjects.len()) {
+                (true, 1) => "thread",
+                (true, _) => "threads",
+                (false, 1) => "process",
+                (false, _) => "processes",
+            }
         )
     };
     let area = p(

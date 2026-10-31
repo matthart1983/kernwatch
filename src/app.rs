@@ -1988,21 +1988,22 @@ impl App {
     /// actually attach to, because the probe filters on a thread id.
     pub fn flame_subjects(&self) -> Vec<FlameSubject> {
         let query = self.filter.to_lowercase();
+        let matches = |x: &crate::domain::Task| {
+            query.is_empty()
+                || x.name.to_lowercase().contains(&query)
+                || x.pid.to_string().contains(&query)
+        };
         let tasks: Vec<&crate::domain::Task> = self
             .snapshot
             .telemetry
             .tasks
             .iter()
             .filter(|x| self.flame_cpu || !x.kernel_thread)
-            .filter(|x| {
-                query.is_empty()
-                    || x.name.to_lowercase().contains(&query)
-                    || x.pid.to_string().contains(&query)
-            })
             .collect();
         let mut subjects: Vec<FlameSubject> = if self.mode == 1 {
             tasks
                 .iter()
+                .filter(|x| matches(x))
                 .map(|x| FlameSubject {
                     name: x.name.clone(),
                     tgid: x.tgid,
@@ -2015,9 +2016,16 @@ impl App {
                 })
                 .collect()
         } else {
+            // A match on any thread lists the process, and every thread still
+            // counts: a capture covers them all, whichever one was searched for.
+            let matched: std::collections::BTreeSet<u32> = tasks
+                .iter()
+                .filter(|x| matches(x))
+                .map(|x| x.tgid)
+                .collect();
             let mut by_process: std::collections::BTreeMap<u32, FlameSubject> =
                 std::collections::BTreeMap::new();
-            for task in &tasks {
+            for task in tasks.iter().filter(|x| matched.contains(&x.tgid)) {
                 let entry = by_process.entry(task.tgid).or_insert_with(|| FlameSubject {
                     name: task.name.clone(),
                     tgid: task.tgid,

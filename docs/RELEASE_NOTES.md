@@ -1,3 +1,12 @@
+## kernwatch v0.5.1
+
+Fixes the Flame picker's search, which misreported the process it found.
+
+- Searching now lists a process when any of its threads matches, and the row counts all of its threads and their CPU. Before, a three-thread process found by name could show `threads 1` and only that thread's CPU, although a capture still covered all three.
+- Searching for a worker thread's name now finds its process. Searching the thread list (`g`) still shows only the threads that match.
+- A syscall capture chosen from a search now takes the process's busiest thread, not the busiest thread that matched.
+- The picker says `1 process` instead of `1 processes`.
+
 ## kernwatch v0.5.0
 
 Cuts kernwatch's own CPU and memory use, and most of the growth that came from leaving it open.

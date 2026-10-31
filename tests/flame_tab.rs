@@ -521,6 +521,51 @@ fn listing_threads_is_a_mode_of_the_same_picker() {
 }
 
 #[test]
+fn searching_the_picker_counts_every_thread_of_a_matching_process() {
+    let mut a = App::new(model::demo());
+    a.snapshot.telemetry.profile = Default::default();
+    a.switch(FLAME);
+    let leader = a
+        .snapshot
+        .telemetry
+        .tasks
+        .iter()
+        .find(|t| !t.kernel_thread)
+        .unwrap()
+        .clone();
+    for (offset, name) in [(90_001, "compactor"), (90_002, "metrics")] {
+        let mut thread = leader.clone();
+        thread.pid = offset;
+        thread.tgid = leader.tgid;
+        thread.name = name.into();
+        thread.cpu_pct = Some(40.);
+        a.snapshot.telemetry.tasks.push(thread);
+    }
+    let whole = a
+        .flame_subjects()
+        .into_iter()
+        .find(|s| s.tgid == leader.tgid)
+        .unwrap();
+    // By the process's name and by a worker's name, the row is the same process.
+    for query in [leader.name.as_str(), "compactor"] {
+        a.filter = query.into();
+        let found = a
+            .flame_subjects()
+            .into_iter()
+            .find(|s| s.tgid == leader.tgid)
+            .unwrap_or_else(|| panic!("{query} should find the process"));
+        assert_eq!(found.threads, whole.threads, "searching {query}");
+        assert_eq!(found.cpu_pct, whole.cpu_pct, "searching {query}");
+    }
+    // The thread list stays literal: it shows only the threads that match.
+    a.mode = 1;
+    a.filter = "compactor".into();
+    let threads = a.flame_subjects();
+    assert_eq!(threads.len(), 1);
+    assert_eq!(threads[0].name, "compactor");
+}
+
+#[test]
 fn a_multi_thread_process_says_which_thread_it_captured() {
     let mut a = App::new(model::demo());
     a.snapshot.telemetry.profile = Default::default();
